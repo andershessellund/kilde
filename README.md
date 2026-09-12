@@ -1,0 +1,306 @@
+# kilde
+
+**Signals, streams, and channels for JavaScript.** *Kilde* is Danish for
+"source" — a spring, and the source of a river.
+
+```bash
+npm install kilde
+```
+
+Three reactive primitives that share one vocabulary, and are cheap to move
+between:
+
+- **Signals** hold a current value and recompute derived values on demand.
+  Reads are synchronous, dependencies are tracked automatically, and a change
+  only propagates when the value is actually different.
+- **Streams** push values through operators with cooperative backpressure. A
+  sink can say *pause*; the source waits. Everything is cold and ref-counted
+  until something subscribes.
+- **Channels** coordinate concurrent code the CSP way: `put`, `take`, and a
+  `select` that waits on several things at once.
+
+On top of those, an **async state** layer models loading, errors and stale
+data as a value (`AsyncValue`) rather than as a pile of booleans, and a
+small **ownership** protocol says who tears a hot resource down — your own
+scope, a framework's, or nobody's.
+
+kilde has one dependency, [valsem](https://github.com/andershessellund/valsem),
+which provides the structural equality signals use to skip no-op updates.
+
+## Signals
+
+```ts
+import { createSignal, computed } from 'kilde';
+
+const first = createSignal('Ada');
+const last = createSignal('Lovelace');
+const full = computed(() => `${first()} ${last()}`);
+
+full(); // 'Ada Lovelace'
+
+first.set('Augusta');
+full(); // 'Augusta Lovelace'
+```
+
+A signal is a function: call it to read. Reading inside `computed` registers a
+dependency, so the graph builds itself. `set` and `update` write; a write whose
+value is equal to the current one (structurally, via valsem's `deepEqual`)
+is dropped and nothing downstream runs.
+
+Observe changes with `observe`. The callback receives the current value at
+once, then every change:
+
+```ts
+const stop = full.observe('value', (name) => document.title = name);
+stop();
+```
+
+Delivery is scheduled. The default scheduler is immediate; pass
+`microtaskScheduler` to coalesce a burst of writes into one notification, or
+`animationFrameScheduler` to render at most once per frame:
+
+```ts
+import { microtaskScheduler } from 'kilde';
+
+count.observe('value', render, microtaskScheduler);
+count.set(1); count.set(2); count.set(3); // render runs once, with 3
+```
+
+Signals know whether anyone is watching. `signal.observed` is true while a
+subscriber or a dependent computed exists, and the `'activate'` and
+`'deactivate'` events fire on the transitions. That is what lets expensive
+sources stay cold until they are needed.
+
+Two more forms are worth knowing:
+
+- `linkedSignal(prev => ...)` is a writable signal with a derivation: it
+  follows its dependencies until you write to it, and resumes following when
+  they change again. Good for "selected item" state that must stay valid as
+  the list changes.
+- `untracked(() => ...)` reads signals without registering dependencies.
+
+## Streams
+
+```ts
+import { stream, fromArray, map, filter, reduce } from 'kilde';
+
+stream(
+  fromArray([1, 2, 3, 4]),
+  filter((n) => n % 2 === 0),
+  map((n) => n * 10),
+  reduce((a, b) => a + b, 0),
+); // 60
+```
+
+`stream(source, ...operators)` composes, connects, and returns the one
+synchronous result. `pipe(source, ...operators)` composes without connecting
+and hands back a `Source` for later. Operators are plain functions from
+`Source<T>` to `Source<R>`, so writing your own needs no base class.
+
+The protocol underneath is small. A `Source<T>` has `connect(sink)`, which
+returns a paused `Stream`; `resume()` starts delivery. The sink's `next(value)`
+may return `PAUSE`, and the source then stops until the next `resume()`. That
+one return value is the whole backpressure story: async iterables, Web
+streams and Node streams all map onto it without buffering in between.
+
+```ts
+import { stream, fromReadableStream, lines, toAsyncIterable } from 'kilde';
+
+const body = stream(fromReadableStream(response.body!), lines(), toAsyncIterable());
+for await (const line of body) {
+  // the response is only read as fast as this loop runs
+}
+```
+
+Bridges out of a pipeline: `toPromise()` (first value), `toCallback(fn)`
+(promise that settles on completion), `toAsyncIterable()`, `toArray()`,
+`toReadableStream()`, `intoWritableStream(w)`, `toSignal({ initial })` and
+`toAsyncSignal()`. Bridges in: `fromArray`, `of`, `fromIterator`, `fromPromise`,
+`fromAsyncFn`, `fromReadableStream`, `fromSignal`, `fromChannel`, and
+`deferred()` — a source you resolve by hand.
+
+Operators: `map`, `filter`, `take`, `scan`, `reduce`, `flatten`, `merge`,
+`switchMap`, `combineLatest`, `catchError`, `pausable`, `scheduleOn`, `lines`.
+Compose several into one with `comp(name, ...ops)`.
+
+`createRelay<T>()` is both a source and a sink: push with `next`, and every
+connected subscriber receives the value through its own pausable buffer, so a
+slow consumer never stalls a fast one.
+
+## Channels
+
+```ts
+import { createChannel, put, channelTake, select, timeout, closed } from 'kilde';
+
+const jobs = createChannel<Job>(8); // buffer of 8; 0 = rendezvous
+
+// producer
+await put(jobs, job);
+
+// consumer
+const result = await select({
+  job: channelTake(jobs),
+  idle: timeout(5_000),
+  done: closed(jobs),
+});
+switch (result.tag) {
+  case 'job':  handle(result.value); break;
+  case 'idle': log('nothing for five seconds'); break;
+  case 'done': return;
+}
+```
+
+`select` takes an object; the keys become the `tag` of the result, and the
+first choice that can proceed wins (ties go to key order). A branch may be a
+single choice or an array of choices for fan-in. Choices are awaitable on
+their own too: `await channelTake(ch)` gives the value directly.
+
+Choices: `channelTake(ch)` (named so it does not collide with the stream
+operator `take`), `put(ch, value)`, `closed(ch)`, `timeout(ms)`,
+`resolved(promise)`, `rejected(promise)`, `defaultChoice()` for a
+non-blocking select. Buffers: a size for a fixed buffer, `droppingBuffer(n)`,
+`slidingBuffer(n)`, `unboundedBuffer()`.
+
+`ReadChannel<T>` and `WriteChannel<T>` are separate views, so an API can hand
+out only the half a caller should have. `intoChannel(ch)` pipes a stream into
+a channel and `fromChannel(ch)` reads one out.
+
+## Async state
+
+An `AsyncValue<T>` is one of `unavailable`, `loading`, `available(value)`, or
+`errored(error)`. The non-available states can carry a `staleValue`, so a UI
+can keep showing the last good result while a refresh is in flight.
+
+```ts
+import {
+  createSignal, createAsyncSignal, alwaysAvailable, switchMapAsync, computedAsync, isAvailable,
+} from 'kilde';
+
+const userId = createSignal(1);
+
+// Cold: fetches when first observed, refetches on retry() or reload(),
+// drops the request when the last observer leaves.
+const user = switchMapAsync(alwaysAvailable(userId), (id) =>
+  createAsyncSignal(() => api.user(id)),
+);
+
+const orders = createAsyncSignal(() => api.orders());
+
+const summary = computedAsync([user, orders], async (u, o) => ({
+  name: u.name,
+  open: o.filter((x) => x.userId === u.id).length,
+}));
+
+summary.observe('value', (v) => {
+  if (isAvailable(v)) render(v.value);
+});
+```
+
+The algebra on values: `mapValue`, `combineValues`, `valueOr`, and the
+guards `isLoading`, `isAvailable`, `isErrored`, `isUnavailable`. On signals:
+`mapAsync`, `combineAsync`, `switchMapAsync`, `computedAsync`,
+`alwaysAvailable`, `toAsyncSignal`. An `AsyncSignal` has `retry()`, which
+chains upstream; signals that own work also have `reload()`.
+
+`deriveResource` turns an async signal into a **hot** managed resource: it
+runs a factory whenever the input becomes available, disposes the previous
+result before installing the next, and tears itself down through its owner.
+
+```ts
+const db = deriveResource(config, async (cfg) => {
+  const pool = await connect(cfg);
+  return { value: pool, [Symbol.dispose]: () => pool.close() };
+});
+```
+
+## Stores
+
+`createStore(initial)` is a writable signal with a lifecycle: disposing it
+completes its subscribers and rejects anything still feeding it.
+`intoStore(store, reducer)` folds a stream into it.
+
+## Ownership
+
+Almost everything in kilde cleans up after itself: a computed with no
+observers costs nothing, a cold source disconnects when its last subscriber
+leaves. A handful of constructs are **hot** — they connect immediately and
+stay connected until disposed:
+
+`connect()`, `toPromise()`, `toCallback()`, `toAsyncIterable()`,
+`toAsyncSignal({ hot: true })`, `link()`, `deriveResource()`.
+
+Each of those hands its teardown to an `Owner`. Without one, you hold the
+handle yourself, exactly as with a subscription in any other library. With
+one, disposal is structured:
+
+```ts
+import { createOwner, withOwner, stream, toPromise } from 'kilde';
+
+const page = createOwner('page');
+
+const first = withOwner(page, () => stream(clicks, toPromise()));
+
+await page.dispose(); // `first` rejects with StreamDisposedError
+```
+
+The owner is resolved in this order: an explicit `{ owner }` option on the
+call, the innermost `withOwner` scope on the synchronous call stack, the
+process-wide provider installed by `installOwnerProvider`, and finally no
+owner at all. `withOwner` is synchronous and does not survive an `await`;
+pass `{ owner }` explicitly after one.
+
+`createOwner()` gives you a plain scope that disposes its resources in
+reverse order and implements `Disposable`, so `using page = createOwner()`
+works. `installOwnerProvider` is the integration seam: a framework or a
+dependency-injection container that already has a notion of "current scope"
+installs a provider once, and every hot construct in the process attaches to
+the right scope automatically. An owner may also implement `spawn`, in which
+case `deriveResource` runs its async work under the owner's supervision
+(useful for drain-on-shutdown and cancellation).
+
+## Node.js
+
+```ts
+import { fromReadable, toReadable, intoWritable } from 'kilde/node';
+```
+
+Bridges between kilde sources and Node's `Readable` and `Writable`, with
+backpressure mapped both ways.
+
+## Testing
+
+```ts
+import { testSource, testSink, exhaustiveTest } from 'kilde/testing';
+
+exhaustiveTest((oracle) => {
+  const sink = testSink<number>({ oracle });
+  const s = pipe(testSource([1, 2, 3], { oracle }), myOperator()).connect(sink);
+  s.resume();
+  while (sink.completeCount === 0) s.resume();
+  expect(sink.values).toEqual([1, 2, 3]);
+});
+```
+
+`testSource` and `testSink` consult a decision oracle at every point where
+they could pause, resume, or deliver; `exhaustiveTest` runs the body once per
+interleaving. If an operator has an ordering bug, this finds it.
+
+## Guarantees and requirements
+
+- Signals never deliver a value equal to the previous one.
+- Cold sources do no work until connected, and release everything when the
+  last connection is disposed.
+- `PAUSE` is honoured by every built-in source and operator. A relay buffers
+  per subscriber so a paused consumer does not stall the others.
+- Hot constructs registered with an owner are torn down exactly once, and any
+  promise waiting on them rejects with `StreamDisposedError`.
+
+Runtime: Node.js 22 or later and current browsers. kilde uses the standard
+`Symbol.dispose` and `Symbol.asyncDispose` and ships ES modules only.
+
+kilde is pre-1.0. The shape is stable enough to build on; names may still
+move.
+
+## License
+
+Apache-2.0

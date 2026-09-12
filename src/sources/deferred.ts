@@ -3,63 +3,79 @@
 //
 // Like a Promise, but supports unsubscription via stream disposal.
 // Multiple subscribers are supported — each gets the value after resume().
+//
+// Each connection is a PauseBuffer. On connect the stream registers with the
+// deferred; when the deferred settles (or if it already has), the settlement
+// is pushed into the buffer, which delivers it under the stream protocol:
+// nothing before the first resume(), the value exactly once, and the
+// terminal event either right away or — if the sink paused on the value —
+// on the next resume(). resume() is idempotent.
 // ---------------------------------------------------------------------------
 
 import type { Sink, Stream, Deferred } from '../types.js';
 import { AbstractSource } from '../abstract-source.js';
+import { PauseBuffer } from '../internal/pause-buffer.js';
+
+type Settlement<T> = { kind: 'resolved'; value: T } | { kind: 'rejected'; error: unknown };
 
 class DeferredStream<T> implements Stream {
+  readonly #buffer: PauseBuffer<T>;
   #disposed = false;
 
   constructor(
     private readonly deferred: DeferredSource<T>,
-    private readonly sink: Sink<T>,
+    sink: Sink<T>,
   ) {
-    deferred._pausedSinks.add(sink);
+    this.#buffer = new PauseBuffer(sink);
+    if (deferred._settlement) {
+      this._settle(deferred._settlement);
+    } else {
+      deferred._waiting.add(this);
+    }
+  }
+
+  /** @internal Called by the deferred when it settles. */
+  _settle(settlement: Settlement<T>): void {
+    if (settlement.kind === 'resolved') {
+      this.#buffer.push(settlement.value);
+      this.#buffer.complete();
+    } else {
+      this.#buffer.error(settlement.error);
+    }
   }
 
   resume(): void {
-    if (this.#disposed) return;
-
-    this.deferred._pausedSinks.delete(this.sink);
-
-    if (this.deferred._resolved) {
-      this.sink.next(this.deferred._resolvedValue!);
-      this.sink.complete();
-    } else if (this.deferred._errored) {
-      this.sink.error(this.deferred._error);
-    } else {
-      // Not yet resolved — add to waiting set
-      this.deferred._waitingSinks.add(this.sink);
-    }
+    this.#buffer.resume();
   }
 
   [Symbol.dispose](): void {
     if (this.#disposed) return;
     this.#disposed = true;
-    this.deferred._pausedSinks.delete(this.sink);
-    this.deferred._waitingSinks.delete(this.sink);
+    this.deferred._waiting.delete(this);
+    this.#buffer.dispose();
   }
 }
 
 class DeferredSource<T> extends AbstractSource<T> implements Deferred<T> {
-  _pausedSinks = new Set<Sink<T>>();
-  _waitingSinks = new Set<Sink<T>>();
-  _resolved = false;
-  _resolvedValue: T | undefined;
-  _errored = false;
-  _error: unknown;
+  /** @internal Streams connected before settlement. */
+  readonly _waiting = new Set<DeferredStream<T>>();
+  /** @internal The settlement, once it has happened. */
+  _settlement: Settlement<T> | null = null;
 
   readonly promise: Promise<T>;
-  private _promiseResolve!: (value: T) => void;
-  private _promiseReject!: (error: unknown) => void;
+  readonly #promiseResolve: (value: T) => void;
+  readonly #promiseReject: (error: unknown) => void;
 
   constructor() {
     super();
+    let res!: (value: T) => void;
+    let rej!: (error: unknown) => void;
     this.promise = new Promise<T>((resolve, reject) => {
-      this._promiseResolve = resolve;
-      this._promiseReject = reject;
+      res = resolve;
+      rej = reject;
     });
+    this.#promiseResolve = res;
+    this.#promiseReject = rej;
   }
 
   connect(sink: Sink<T>): Stream {
@@ -67,28 +83,38 @@ class DeferredSource<T> extends AbstractSource<T> implements Deferred<T> {
   }
 
   resolve(value: T): void {
-    if (this._resolved || this._errored) return;
-    this._resolved = true;
-    this._resolvedValue = value;
-    this._promiseResolve(value);
-
-    for (const sink of this._waitingSinks) {
-      sink.next(value);
-      sink.complete();
-    }
-    this._waitingSinks.clear();
+    if (this._settlement) return;
+    this.#promiseResolve(value);
+    this.#settle({ kind: 'resolved', value });
   }
 
   reject(error: unknown): void {
-    if (this._resolved || this._errored) return;
-    this._errored = true;
-    this._error = error;
-    this._promiseReject(error);
+    if (this._settlement) return;
+    this.#promiseReject(error);
+    this.#settle({ kind: 'rejected', error });
+  }
 
-    for (const sink of this._waitingSinks) {
-      sink.error(error);
+  /**
+   * Record the settlement and notify every waiting stream. A sink that
+   * throws does not prevent the others from being notified — errors are
+   * collected and rethrown once everyone has been told.
+   */
+  #settle(settlement: Settlement<T>): void {
+    this._settlement = settlement;
+    const streams = [...this._waiting];
+    this._waiting.clear();
+    const errors: unknown[] = [];
+    for (const stream of streams) {
+      try {
+        stream._settle(settlement);
+      } catch (err) {
+        errors.push(err);
+      }
     }
-    this._waitingSinks.clear();
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(errors, 'deferred: one or more sinks threw during settlement');
+    }
   }
 }
 
@@ -97,6 +123,10 @@ class DeferredSource<T> extends AbstractSource<T> implements Deferred<T> {
  *
  * Unlike a Promise, supports unsubscription — disposing the stream before
  * resolution means the sink never receives a value.
+ *
+ * `resolve()` / `reject()` are idempotent: only the first settlement counts.
+ * Every subscriber is notified even if one of them throws; the exception(s)
+ * are rethrown to the caller of `resolve()` / `reject()` afterwards.
  *
  * @example
  * ```ts

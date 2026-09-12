@@ -87,6 +87,10 @@ describe('SignalDeduplicator', () => {
       }
     });
 
+    // Eviction is driven by 'deactivate', which only fires for observed
+    // signals — so the consuming computed must itself be observed.
+    const stop = derived.observe('value', () => {});
+
     // Initially depends on id:1
     expect(derived()).toBe(1);
     expect(coll.size).toBe(1);
@@ -98,6 +102,21 @@ describe('SignalDeduplicator', () => {
     // id:1 was auto-evicted via onUnobserved (no manual evict() needed)
     expect(coll.size).toBe(1);
     expect([...coll.keys()]).toEqual([{ id: '2' }]);
+    stop();
+  });
+
+  it('does not evict while the consuming computed is unobserved', () => {
+    const { factory } = trackingFactory();
+    const coll = new SignalDeduplicator<{ id: string }, number>();
+    const toggle = createSignal(true);
+    const derived = computed(() => (toggle() ? coll.getOrCreate({ id: '1' }, factory)() : 0));
+
+    // A plain read registers nothing, so the cached signal never activates
+    // and therefore never deactivates.
+    expect(derived()).toBe(1);
+    toggle.set(false);
+    expect(derived()).toBe(0);
+    expect(coll.size).toBe(1);
   });
 
   it('auto-evicts signal when stream subscriber disconnects', () => {
@@ -161,6 +180,7 @@ describe('SignalDeduplicator', () => {
       }
     });
 
+    const stop = derived.observe('value', () => {});
     expect(derived()).toBe(1);
 
     // Drop dependency — triggers auto-eviction and onEvict
@@ -168,6 +188,7 @@ describe('SignalDeduplicator', () => {
     expect(derived()).toBe(0);
 
     expect(evictedKeys).toEqual(['1']);
+    stop();
   });
 
   it('calls onEvict on delete()', () => {
@@ -277,6 +298,10 @@ describe('SignalDeduplicator', () => {
       });
     });
 
+    // The view is observed (as a live query would be), so dropped line
+    // signals deactivate and are evicted.
+    const stop = journalView.observe('value', () => {});
+
     // Initial read
     const result = journalView();
     expect(result).toEqual([
@@ -295,6 +320,7 @@ describe('SignalDeduplicator', () => {
 
     // e2's line signal was auto-evicted (no manual evict() needed)
     expect(lineCache.size).toBe(1);
+    stop();
   });
 
   // --- Signal.observe('deactivate') ---
@@ -308,8 +334,8 @@ describe('SignalDeduplicator', () => {
     const derived = computed(() => sig() * 2);
     expect(derived()).toBe(84);
 
-    // Signal is observed by the computed's TrackerNode
-    expect(sig.observed).toBe(true);
+    // A plain read of an unobserved computed registers nothing
+    expect(sig.observed).toBe(false);
     expect(cb).not.toHaveBeenCalled();
 
     // Create a second computed that also depends on sig
@@ -319,6 +345,7 @@ describe('SignalDeduplicator', () => {
     // Connect a stream to derived to keep it alive, then dispose
     const s1 = fromSignal(derived).connect({ next: () => undefined, complete: () => {}, error: () => {} });
     s1.resume();
+    expect(sig.observed).toBe(true);
     const s2 = fromSignal(derived2).connect({ next: () => undefined, complete: () => {}, error: () => {} });
     s2.resume();
 

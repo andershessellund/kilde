@@ -26,7 +26,12 @@ export interface SignalDeduplicatorOptions<K, V> {
  *
  * `getOrCreate(key, factory)` returns a cached signal or creates one via the
  * factory. Signals are automatically evicted when they become unobserved
- * (via `onUnobserved()`).
+ * (their `'deactivate'` event).
+ *
+ * Eviction therefore needs observation: a cached signal that is only ever
+ * read by an *unobserved* computed never activates, so it never deactivates
+ * either. Use the cache from computeds that are observed (a live query, a
+ * rendered view), or call `delete()` / `clear()` yourself.
  *
  * Designed for use inside `computed()`:
  *

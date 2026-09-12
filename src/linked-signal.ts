@@ -130,7 +130,12 @@ export function link<T>(
 
   function activate(): void {
     if (disposed || unsub) return;
-    unsub = derived.observe('value', (v) => signal.set(v));
+    unsub = derived.observe('value', (v) => {
+      // Keep the pull side in step, or the next read would treat this
+      // already-applied derivation as new and overwrite a manual set().
+      lastPulled = v;
+      signal.set(v);
+    });
   }
 
   function deactivate(): void {

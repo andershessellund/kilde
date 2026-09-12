@@ -7,26 +7,14 @@
 // ---------------------------------------------------------------------------
 
 import type { Source, Signal, Stream } from '../types.js';
+import { PAUSE } from '../types.js';
 import type { AsyncValue } from '../async-value.js';
 import { loading, available, errored, unavailable, isErrored } from '../async-value.js';
 import { createSignal } from '../signal.js';
-import { currentOwner } from '../owner.js';
 import type { OwnedOptions } from '../owner.js';
 import type { AsyncSignal } from '../async-state.js';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function wrapAsyncSignal<T>(
-  signal: Signal<AsyncValue<T>>,
-  retry: () => void,
-): AsyncSignal<T> {
-  Object.defineProperties(signal, {
-    retry: { value: retry, configurable: true },
-  });
-  return signal as AsyncSignal<T>;
-}
+import { wrapAsyncSignal } from '../async-state.js';
+import { registerWithOwner } from '../internal/owned.js';
 
 // ---------------------------------------------------------------------------
 // Options
@@ -86,28 +74,39 @@ export function toAsyncSignal<T>(
     );
     let upstream: Stream | null = null;
     let lastGoodValue: T | undefined;
+    // Hot mode: the owner has torn us down — never reconnect.
+    let tornDown = false;
 
     function connectUpstream(): void {
-      if (upstream) return;
+      if (upstream || tornDown) return;
 
       state.set(loading<T>(lastGoodValue));
 
-      upstream = source.connect({
-        next(value: T): undefined {
+      // One connection at a time; a connection that has ended must not
+      // touch the signal again even if the source misbehaves.
+      let ended = false;
+      const conn = source.connect({
+        next(value: T): undefined | PAUSE {
+          if (ended) return PAUSE;
           lastGoodValue = value;
           state.set(available(value));
           return undefined;
         },
         complete() {
+          if (ended) return;
+          ended = true;
           // Absorbed — keep last value
-          upstream = null;
+          if (upstream === conn) upstream = null;
         },
         error(err: unknown) {
-          upstream = null;
+          if (ended) return;
+          ended = true;
+          if (upstream === conn) upstream = null;
           state.set(errored<T>(err, lastGoodValue));
         },
       });
-      upstream.resume();
+      upstream = conn;
+      conn.resume();
     }
 
     function disconnectUpstream(): void {
@@ -124,14 +123,13 @@ export function toAsyncSignal<T>(
     }
 
     if (hot) {
-      // Hot: connect immediately
+      // Register teardown with the owner first — an already-disposed owner
+      // tears us down synchronously, in which case we never connect.
+      registerWithOwner(opts?.owner, 'toAsyncSignal(hot)', () => {
+        tornDown = true;
+        disconnectUpstream();
+      });
       connectUpstream();
-
-      // Register teardown with the owner
-      (opts?.owner ?? currentOwner()).register(
-        { [Symbol.dispose]: () => disconnectUpstream() },
-        'toAsyncSignal(hot)',
-      );
     } else {
       // Cold: connect/disconnect on observer lifecycle
       state.observe('activate', () => connectUpstream());

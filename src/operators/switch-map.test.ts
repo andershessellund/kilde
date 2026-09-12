@@ -8,10 +8,12 @@ import { PAUSE } from '../types.js';
 import { pipe } from '../stream.js';
 import { fromArray } from '../sources/from-array.js';
 import { empty } from '../sources/empty.js';
+import { createRelay } from '../relay.js';
 import { switchMap } from './switch-map.js';
 import { testSource } from '../testing/test-source.js';
 import { testSink } from '../testing/test-sink.js';
 import { exhaustiveTest } from '../testing/exhaustive.js';
+import { assertProtocol } from '../testing/protocol.js';
 
 function drive(s: { resume(): void }, sink: { completeCount: number }, max = 40) {
   for (let i = 0; i < max && !sink.completeCount; i++) s.resume();
@@ -22,25 +24,40 @@ describe('switchMap (exhaustive)', () => {
     exhaustiveTest((oracle) => {
       const src = testSource([10], { oracle });
       const sink = testSink<number>({ oracle });
-      const s = pipe(src, switchMap((x) => fromArray([x, x + 1]))).connect(sink);
+      const s = pipe(src, switchMap((x) => fromArray([x, x + 1])), assertProtocol()).connect(sink);
       drive(s, sink);
       expect(sink.values).toEqual([10, 11]);
       expect(sink.completeCount).toBe(1);
     });
   });
 
+  it('single outer value — self-pausing inner', () => {
+    exhaustiveTest((oracle) => {
+      const src = testSource([10], { oracle });
+      const sink = testSink<number>({ oracle });
+      const s = pipe(
+        src,
+        switchMap((x) => testSource([x, x + 1, x + 2], { oracle })),
+        assertProtocol(),
+      ).connect(sink);
+      drive(s, sink);
+      expect(sink.values).toEqual([10, 11, 12]);
+      expect(sink.completeCount).toBe(1);
+    });
+  });
+
   it('two outer values — each inner completes before next arrives', () => {
     // With fromArray inners and sequential outer, each inner completes
-    // synchronously before the next outer value. All values are collected.
+    // synchronously before the next outer value — unless the downstream
+    // paused, in which case the pending inner is switched away.
     exhaustiveTest((oracle) => {
       const src = testSource([1, 2], { oracle });
       const sink = testSink<number>({ oracle });
-      const s = pipe(src, switchMap((x) => fromArray([x * 10, x * 10 + 1]))).connect(sink);
+      const s = pipe(src, switchMap((x) => fromArray([x * 10, x * 10 + 1])), assertProtocol()).connect(sink);
       drive(s, sink);
-      // Outer emits 1 → inner [10, 11]. Then outer emits 2 → disposes
-      // inner (already complete), new inner [20, 21].
-      // With synchronous inners, both complete before being switched.
       expect(sink.completeCount).toBe(1);
+      // The last inner always runs to completion.
+      expect(sink.values.slice(-2)).toEqual([20, 21]);
     });
   });
 
@@ -62,6 +79,7 @@ describe('switchMap (exhaustive)', () => {
     const s = pipe(
       src,
       switchMap((x) => (x === 1 ? slowInner : fromArray([99]))),
+      assertProtocol(),
     ).connect(sink);
     s.resume();
     // First outer value connects slowInner. Second outer value switches
@@ -74,7 +92,7 @@ describe('switchMap (exhaustive)', () => {
     exhaustiveTest((oracle) => {
       const src = testSource<number>([], { oracle });
       const sink = testSink<number>({ oracle });
-      const s = pipe(src, switchMap((x) => fromArray([x]))).connect(sink);
+      const s = pipe(src, switchMap((x) => fromArray([x])), assertProtocol()).connect(sink);
       drive(s, sink);
       expect(sink.values).toEqual([]);
       expect(sink.completeCount).toBe(1);
@@ -85,7 +103,7 @@ describe('switchMap (exhaustive)', () => {
     exhaustiveTest((oracle) => {
       const src = testSource([1, 2], { oracle });
       const sink = testSink<number>({ oracle });
-      const s = pipe(src, switchMap(() => empty<number>())).connect(sink);
+      const s = pipe(src, switchMap(() => empty<number>()), assertProtocol()).connect(sink);
       drive(s, sink);
       expect(sink.values).toEqual([]);
       expect(sink.completeCount).toBe(1);
@@ -99,11 +117,11 @@ describe('switchMap (exhaustive)', () => {
       const s = pipe(
         src,
         switchMap((x) => (x === 2 ? empty<number>() : fromArray([x * 10]))),
+        assertProtocol(),
       ).connect(sink);
       drive(s, sink);
-      // Value 1 → [10], value 2 → empty (disposes [10] if still active),
-      // value 3 → [30]. With sync inners, all complete before switch.
       expect(sink.completeCount).toBe(1);
+      expect(sink.values[sink.values.length - 1]).toBe(30);
     });
   });
 
@@ -114,9 +132,11 @@ describe('switchMap (exhaustive)', () => {
       const s = pipe(
         src,
         switchMap((x) => fromArray([x, x + 10])),
+        assertProtocol(),
       ).connect(sink);
       drive(s, sink);
       expect(sink.completeCount).toBe(1);
+      expect(sink.values.slice(-2)).toEqual([3, 13]);
     });
   });
 
@@ -162,7 +182,7 @@ describe('switchMap (exhaustive)', () => {
 
     const src = fromArray([1]);
     const sink = testSink<number>();
-    const s = pipe(src, switchMap(() => failingInner)).connect(sink);
+    const s = pipe(src, switchMap(() => failingInner), assertProtocol()).connect(sink);
     s.resume();
     expect(sink.errors).toHaveLength(1);
     expect((sink.errors[0] as Error).message).toBe('boom');
@@ -179,7 +199,7 @@ describe('switchMap (exhaustive)', () => {
     };
 
     const sink = testSink<number>();
-    const s = pipe(failingOuter, switchMap((x) => fromArray([x]))).connect(sink);
+    const s = pipe(failingOuter, switchMap((x) => fromArray([x])), assertProtocol()).connect(sink);
     s.resume();
     expect(sink.errors).toHaveLength(1);
     expect((sink.errors[0] as Error).message).toBe('outer-boom');
@@ -255,5 +275,120 @@ describe('switchMap (exhaustive)', () => {
     pauseNext = false;
     s.resume();
     expect(values).toEqual([1, 2]);
+  });
+});
+
+describe('switchMap (bug 3 — outer error / throwing project fn)', () => {
+  function tracked<T>(source: Source<T>): Source<T> & { disposed: number } {
+    const t = {
+      disposed: 0,
+      connect(sink: Sink<T>) {
+        const s = source.connect(sink);
+        return {
+          resume: () => s.resume(),
+          [Symbol.dispose]: () => {
+            t.disposed++;
+            s[Symbol.dispose]();
+          },
+        };
+      },
+    };
+    return t;
+  }
+
+  it('outer error disposes the active inner and ignores its later values', () => {
+    const outer = createRelay<number>();
+    const innerRelay = createRelay<number>();
+    const inner = tracked(innerRelay);
+    const sink = testSink<number>();
+    const s = pipe(outer, switchMap(() => inner), assertProtocol()).connect(sink);
+    s.resume();
+    outer.next(1);
+    innerRelay.next(10);
+    expect(sink.values).toEqual([10]);
+
+    outer.error(new Error('outer boom'));
+    expect(sink.errors).toHaveLength(1);
+    expect(inner.disposed).toBe(1);
+
+    innerRelay.next(11);
+    innerRelay.complete();
+    expect(sink.values).toEqual([10]);
+    s.resume(); // no-op after terminal
+  });
+
+  it('a throwing project fn errors the downstream and disposes the outer', () => {
+    const outerRelay = createRelay<number>();
+    const outer = tracked(outerRelay);
+    const sink = testSink<number>();
+    const s = pipe(
+      outer,
+      switchMap((x: number) => {
+        if (x === 2) throw new Error('project-fail');
+        return fromArray([x]);
+      }),
+      assertProtocol(),
+    ).connect(sink);
+    s.resume();
+    outerRelay.next(1);
+    expect(sink.values).toEqual([1]);
+    expect(() => outerRelay.next(2)).not.toThrow();
+    expect(sink.errors).toHaveLength(1);
+    expect((sink.errors[0] as Error).message).toBe('project-fail');
+    expect(outer.disposed).toBe(1);
+    outerRelay.next(3); // ignored
+    expect(sink.values).toEqual([1]);
+  });
+
+  it('inner error disposes the outer', () => {
+    const outerRelay = createRelay<number>();
+    const outer = tracked(outerRelay);
+    const innerRelay = createRelay<number>();
+    const sink = testSink<number>();
+    const s = pipe(outer, switchMap(() => innerRelay), assertProtocol()).connect(sink);
+    s.resume();
+    outerRelay.next(1);
+    innerRelay.error(new Error('inner boom'));
+    expect(sink.errors).toHaveLength(1);
+    expect(outer.disposed).toBe(1);
+  });
+});
+
+describe('switchMap (relay outer)', () => {
+  it('switches between asynchronous inners', () => {
+    const outer = createRelay<number>();
+    const inners = [createRelay<number>(), createRelay<number>()];
+    const sink = testSink<number>();
+    const s = pipe(outer, switchMap((i: number) => inners[i]), assertProtocol()).connect(sink);
+    s.resume();
+
+    outer.next(0);
+    inners[0].next(1);
+    outer.next(1); // switch: inners[0] is disposed
+    inners[0].next(99); // dropped
+    inners[1].next(2);
+    expect(sink.values).toEqual([1, 2]);
+
+    outer.complete();
+    expect(sink.completeCount).toBe(0); // inner still active
+    inners[1].next(3);
+    inners[1].complete();
+    expect(sink.values).toEqual([1, 2, 3]);
+    expect(sink.completeCount).toBe(1);
+  });
+
+  it('an inner arriving while the downstream is paused waits for resume()', () => {
+    const outer = createRelay<number>();
+    let pauseNext = true;
+    const sink = testSink<number>({ oracle: { integer: () => (pauseNext ? 1 : 0) } });
+    const s = pipe(outer, switchMap((x: number) => fromArray([x, x + 1])), assertProtocol()).connect(sink);
+    s.resume();
+    outer.next(10); // 10 delivered, sink pauses, inner paused
+    outer.next(20); // switch; new inner not resumed
+    expect(sink.values).toEqual([10]);
+
+    pauseNext = false;
+    s.resume();
+    expect(sink.values).toEqual([10, 20, 21]);
   });
 });

@@ -5,68 +5,30 @@
 import type { Source, Sink, Stream, Operator } from '../types.js';
 import { PAUSE } from '../types.js';
 import { AbstractSource } from '../abstract-source.js';
+import { completeOnResume } from '../internal/complete-on-resume.js';
+import { OperatorStream, connectOperator } from '../internal/operator-stream.js';
 
-class TakeStream<T> implements Stream, Sink<T> {
+class TakeStream<T> extends OperatorStream<T, T> {
   #remaining: number;
-  #disposed = false;
-  #upstream!: Stream;
 
-  constructor(
-    private readonly sink: Sink<T>,
-    count: number,
-  ) {
+  constructor(sink: Sink<T>, count: number) {
+    super(sink);
     this.#remaining = count;
   }
 
-  _setUpstream(upstream: Stream): void {
-    this.#upstream = upstream;
-  }
-
-  // --- Sink<T> ---
-
-  next(value: T): undefined | typeof PAUSE {
-    if (this.#disposed || this.#remaining <= 0) return PAUSE;
-
+  protected onValue(value: T): undefined | PAUSE {
     this.#remaining--;
-    const result = this.sink.next(value);
-
+    const result = this.emit(value);
     if (this.#remaining <= 0) {
-      this.#upstream[Symbol.dispose]();
-      this.sink.complete();
+      // Satisfied: release the upstream and complete exactly once.
+      this.finish();
       return PAUSE;
     }
-
     return result;
-  }
-
-  complete(): void {
-    if (!this.#disposed) {
-      this.sink.complete();
-    }
-  }
-
-  error(error: unknown): void {
-    if (!this.#disposed) {
-      this.sink.error(error);
-    }
-  }
-
-  // --- Stream ---
-
-  resume(): void {
-    if (this.#remaining <= 0) {
-      this.sink.complete();
-      return;
-    }
-    this.#upstream.resume();
-  }
-
-  [Symbol.dispose](): void {
-    this.#disposed = true;
-    this.#upstream[Symbol.dispose]();
   }
 }
 
+/** `take(0)`: never connects upstream, completes once on the first resume. */
 class TakeSource<T> extends AbstractSource<T> {
   constructor(
     private readonly source: Source<T>,
@@ -76,10 +38,8 @@ class TakeSource<T> extends AbstractSource<T> {
   }
 
   connect(sink: Sink<T>): Stream {
-    const takeStream = new TakeStream(sink, this.count);
-    const upstream = this.source.connect(takeStream);
-    takeStream._setUpstream(upstream);
-    return takeStream;
+    if (this.count <= 0) return completeOnResume(sink);
+    return connectOperator(this.source, new TakeStream(sink, this.count));
   }
 }
 
@@ -87,7 +47,8 @@ class TakeSource<T> extends AbstractSource<T> {
  * Emit the first `n` values from the source, then dispose upstream
  * and complete.
  *
- * `take(0)` completes immediately on resume without connecting upstream.
+ * `take(0)` never connects to the upstream at all: it completes on the
+ * first `resume()` and does nothing on later ones.
  *
  * @example
  * ```ts

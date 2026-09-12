@@ -2,102 +2,71 @@
 // Relay — Source + Sink (Subject-like)
 //
 // Values pushed via next() are multicast to all connected subscribers.
-// Each subscriber gets its own pausable buffer so slow consumers don't
-// block fast ones.
+// Each subscriber gets its own PauseBuffer so slow consumers don't block
+// fast ones, and so that nothing — not even a terminal event the relay
+// received before the subscriber connected — reaches a sink before its
+// first resume().
 // ---------------------------------------------------------------------------
 
 import type { Sink, Stream, Relay } from './types.js';
-import { PAUSE } from './types.js';
+import type { PAUSE } from './types.js';
 import { AbstractSource } from './abstract-source.js';
+import { PauseBuffer } from './internal/pause-buffer.js';
 
 // ---------------------------------------------------------------------------
 // Per-subscriber pausable connection
 // ---------------------------------------------------------------------------
 
 class RelaySubscription<T> implements Stream {
-  #buffer: T[] = [];
-  #paused = true;
+  readonly #buffer: PauseBuffer<T>;
   #disposed = false;
-  #completed = false;
-  #error: unknown;
-  #hasError = false;
 
   constructor(
     private readonly relay: RelayImpl<T>,
-    private readonly sink: Sink<T>,
-  ) {}
+    sink: Sink<T>,
+  ) {
+    this.#buffer = new PauseBuffer<T>(sink);
+  }
 
   /** Push a value from the relay to this subscriber. */
   push(value: T): void {
     if (this.#disposed) return;
-
-    if (this.#paused) {
-      this.#buffer.push(value);
-      return;
-    }
-
-    const result = this.sink.next(value);
-    if (result === PAUSE) {
-      this.#paused = true;
-    }
+    // The relay never applies backpressure to its producer; a paused
+    // subscriber simply accumulates.
+    this.#buffer.push(value);
   }
 
-  /** Notify this subscriber of completion. */
+  /** Notify this subscriber of completion (after any buffered values). */
   pushComplete(): void {
     if (this.#disposed) return;
-    if (this.#paused && this.#buffer.length > 0) {
-      this.#completed = true;
-    } else {
-      this.sink.complete();
-    }
+    this.#buffer.complete();
+    this.#leaveIfTerminated();
   }
 
-  /** Notify this subscriber of an error. */
+  /** Notify this subscriber of an error (after any buffered values). */
   pushError(error: unknown): void {
     if (this.#disposed) return;
-    if (this.#paused && this.#buffer.length > 0) {
-      this.#hasError = true;
-      this.#error = error;
-    } else {
-      this.sink.error(error);
-    }
+    this.#buffer.error(error);
+    this.#leaveIfTerminated();
   }
 
   // --- Stream ---
 
   resume(): void {
     if (this.#disposed) return;
-
-    // Drain buffer
-    while (this.#buffer.length > 0) {
-      const value = this.#buffer.shift()!;
-      const result = this.sink.next(value);
-      if (result === PAUSE) {
-        // Still paused — stop draining
-        return;
-      }
-    }
-
-    if (this.#disposed) return;
-
-    // Check deferred terminal events
-    if (this.#completed) {
-      this.sink.complete();
-      return;
-    }
-    if (this.#hasError) {
-      this.sink.error(this.#error);
-      return;
-    }
-
-    this.#paused = false;
+    this.#buffer.resume();
+    this.#leaveIfTerminated();
   }
 
   [Symbol.dispose](): void {
     if (this.#disposed) return;
     this.#disposed = true;
-    this.#buffer.length = 0;
+    this.#buffer.dispose();
     this.relay._removeSubscription(this);
+  }
+
+  #leaveIfTerminated(): void {
+    if (this.#buffer.terminated) this.relay._removeSubscription(this);
   }
 }
 
@@ -113,7 +82,7 @@ class RelayImpl<T> extends AbstractSource<T> implements Relay<T> {
 
   // --- Sink<T> (push side) ---
 
-  next(value: T): undefined | typeof PAUSE {
+  next(value: T): undefined | PAUSE {
     if (this.#completed || this.#hasError) return undefined;
     for (const sub of this.#subscriptions) {
       sub.push(value);
@@ -124,7 +93,7 @@ class RelayImpl<T> extends AbstractSource<T> implements Relay<T> {
   complete(): void {
     if (this.#completed || this.#hasError) return;
     this.#completed = true;
-    for (const sub of this.#subscriptions) {
+    for (const sub of [...this.#subscriptions]) {
       sub.pushComplete();
     }
   }
@@ -133,7 +102,7 @@ class RelayImpl<T> extends AbstractSource<T> implements Relay<T> {
     if (this.#completed || this.#hasError) return;
     this.#hasError = true;
     this.#error = error;
-    for (const sub of this.#subscriptions) {
+    for (const sub of [...this.#subscriptions]) {
       sub.pushError(error);
     }
   }
@@ -144,7 +113,8 @@ class RelayImpl<T> extends AbstractSource<T> implements Relay<T> {
     const sub = new RelaySubscription(this, sink);
     this.#subscriptions.add(sub);
 
-    // If already completed/errored, notify immediately (deferred until resume)
+    // Already ended: the terminal event is queued in the subscription's
+    // buffer and delivered on its first resume() — never inside connect().
     if (this.#completed) {
       sub.pushComplete();
     } else if (this.#hasError) {
@@ -165,7 +135,11 @@ class RelayImpl<T> extends AbstractSource<T> implements Relay<T> {
  * Create a relay — a `Source<T>` and `Sink<T>` combined.
  *
  * Values pushed via `next()` are multicast to all connected subscribers.
- * Each subscriber gets its own pausable buffer for backpressure isolation.
+ * Each subscriber gets its own pausable buffer for backpressure isolation:
+ * values that arrive while a subscriber is paused are queued and drained
+ * on its `resume()`, and `complete()`/`error()` reach a subscriber only
+ * after its queue has drained. A subscriber that connects after the relay
+ * has ended receives the terminal event on its first `resume()`.
  *
  * @example
  * ```ts

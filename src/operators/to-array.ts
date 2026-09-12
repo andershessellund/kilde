@@ -2,64 +2,26 @@
 // toArray — collect all values into an array, emit on complete
 // ---------------------------------------------------------------------------
 
-import type { Source, Sink, Stream, Operator } from '../types.js';
-import { PAUSE } from '../types.js';
-import { AbstractSource } from '../abstract-source.js';
+import type { Sink, Operator, PAUSE } from '../types.js';
+import { OperatorStream, OperatorSource } from '../internal/operator-stream.js';
 
-class ToArrayStream<T> implements Stream, Sink<T> {
+class ToArrayStream<T> extends OperatorStream<T, T[]> {
   #buffer: T[] = [];
-  #disposed = false;
-  #upstream!: Stream;
 
-  constructor(private readonly sink: Sink<T[]>) {}
-
-  _setUpstream(upstream: Stream): void {
-    this.#upstream = upstream;
+  constructor(sink: Sink<T[]>) {
+    super(sink);
   }
 
-  // --- Sink<T> ---
-
-  next(value: T): undefined | typeof PAUSE {
-    if (this.#disposed) return PAUSE;
+  protected onValue(value: T): undefined | PAUSE {
     this.#buffer.push(value);
     return undefined; // Never pause — collect everything
   }
 
-  complete(): void {
-    if (!this.#disposed) {
-      this.sink.next(this.#buffer);
-      this.sink.complete();
-    }
-  }
-
-  error(error: unknown): void {
-    if (!this.#disposed) {
-      this.sink.error(error);
-    }
-  }
-
-  // --- Stream ---
-
-  resume(): void {
-    this.#upstream.resume();
-  }
-
-  [Symbol.dispose](): void {
-    this.#disposed = true;
-    this.#upstream[Symbol.dispose]();
-  }
-}
-
-class ToArraySource<T> extends AbstractSource<T[]> {
-  constructor(private readonly source: Source<T>) {
-    super();
-  }
-
-  connect(sink: Sink<T[]>): Stream {
-    const toArrayStream = new ToArrayStream<T>(sink);
-    const upstream = this.source.connect(toArrayStream);
-    toArrayStream._setUpstream(upstream);
-    return toArrayStream;
+  protected onComplete(): void {
+    // The array is handed over as-is; the downstream may dispose us while
+    // still holding it, so it is never cleared here.
+    this.emit(this.#buffer);
+    this.emitComplete();
   }
 }
 
@@ -77,5 +39,5 @@ class ToArraySource<T> extends AbstractSource<T[]> {
  * ```
  */
 export function toArray<T>(): Operator<T, T[]> {
-  return (source) => new ToArraySource(source);
+  return (source) => new OperatorSource(source, (sink) => new ToArrayStream<T>(sink));
 }

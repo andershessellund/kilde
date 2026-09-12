@@ -12,8 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Choice } from './choice.js';
-import { _setSelectOne, ChoiceDeadEnd } from './choice.js';
-import type { ChoiceAwaitValue } from './choice.js';
+import { ChoiceDeadEnd } from './choice.js';
 
 // ---------------------------------------------------------------------------
 // SelectMap — the input type for select()
@@ -203,14 +202,3 @@ function buildResult(entry: FlatEntry, result: unknown): Record<string, unknown>
     ...(result as Record<string, unknown>),
   };
 }
-
-// ---------------------------------------------------------------------------
-// selectOne — used by makeAwaitable's then() mixin
-// ---------------------------------------------------------------------------
-
-function selectOne<T>(choice: Choice<T>): Promise<ChoiceAwaitValue<T>> {
-  return select({ _: choice }).then((r: any) => r.value);
-}
-
-// Wire up the circular dependency
-_setSelectOne(selectOne);

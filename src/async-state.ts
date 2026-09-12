@@ -105,7 +105,8 @@ function rejectWaiters<T>(waiters: ReloadWaiter<T>[], error: unknown): void {
 // Internal helpers — attach .retry / .reload / [Symbol.dispose] to existing signals
 // ---------------------------------------------------------------------------
 
-function wrapAsyncSignal<T>(
+/** @internal Attach `retry` to a signal, making it an {@link AsyncSignal}. */
+export function wrapAsyncSignal<T>(
   signal: Signal<AsyncValue<T>>,
   retry: () => void,
 ): AsyncSignal<T> {
@@ -737,7 +738,17 @@ export function deriveResource<T, R>(
 
     if (isAvailable(inputValue)) {
       const value = inputValue.value;
-      const result = fn(value);
+      let result: DeriveResourceReturn<R>;
+      try {
+        result = fn(value);
+      } catch (err) {
+        // A throwing factory is an errored derivation, not a crash in the
+        // signal flush that delivered the input.
+        disposeCurrentResource();
+        inner.set(errored<R>(err, keepStale ? lastGoodOutput : undefined));
+        if (reloadWaiters) rejectWaiters(reloadWaiters, err);
+        return;
+      }
 
       // Promise path — run under the owner's supervision when available
       if (result != null && typeof (result as any).then === 'function') {

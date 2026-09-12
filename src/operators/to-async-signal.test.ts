@@ -7,6 +7,8 @@ import { toAsyncSignal } from './to-async-signal.js';
 import { deferred } from '../sources/deferred.js';
 import { createSignal } from '../signal.js';
 import { fromSignal } from '../sources/from-signal.js';
+import { createOwner } from '../owner.js';
+import type { Source, Sink } from '../types.js';
 import {
   available,
   isAvailable,
@@ -169,5 +171,64 @@ describe('toAsyncSignal — hot', () => {
     d.reject(new Error('hot-fail'));
     expect(isErrored(sig())).toBe(true);
     expect((sig() as any).error.message).toBe('hot-fail');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Protocol guards
+// ---------------------------------------------------------------------------
+
+describe('toAsyncSignal — protocol', () => {
+  it('ignores a misbehaving source that emits after complete()', () => {
+    let sink: Sink<number> | undefined;
+    const src: Source<number> = {
+      connect(s) {
+        sink = s;
+        return { resume() {}, [Symbol.dispose]() {} };
+      },
+    };
+    const sig = toAsyncSignal<number>({ hot: true })(src);
+    sink!.next(1);
+    sink!.complete();
+    expect(sig()).toEqual(available(1));
+    sink!.next(2); // after the terminal — must not touch the signal
+    sink!.error(new Error('late'));
+    expect(sig()).toEqual(available(1));
+  });
+
+  it('hot: registers with the owner before connecting; a disposed owner never connects', async () => {
+    const owner = createOwner('dead');
+    await owner.dispose();
+    let connects = 0;
+    const src: Source<number> = {
+      connect() {
+        connects++;
+        return { resume() {}, [Symbol.dispose]() {} };
+      },
+    };
+    const sig = toAsyncSignal<number>({ hot: true, owner })(src);
+    expect(connects).toBe(0);
+    expect(isLoading(sig())).toBe(true);
+    sig.retry(); // still nothing
+    expect(connects).toBe(0);
+  });
+
+  it('hot: owner disposal disconnects the source', async () => {
+    const owner = createOwner('scope');
+    let disposed = 0;
+    const src: Source<number> = {
+      connect() {
+        return {
+          resume() {},
+          [Symbol.dispose]() {
+            disposed++;
+          },
+        };
+      },
+    };
+    toAsyncSignal<number>({ hot: true, owner })(src);
+    expect(owner.size).toBe(1);
+    await owner.dispose();
+    expect(disposed).toBe(1);
   });
 });

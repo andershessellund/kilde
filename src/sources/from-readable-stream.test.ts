@@ -11,6 +11,10 @@ import { lines } from '../operators/lines.js';
 import { stream } from '../stream.js';
 import { PAUSE } from '../types.js';
 import type { Sink, PAUSE as PAUSETYPE } from '../types.js';
+import { testSink } from '../testing/test-sink.js';
+import { assertProtocol } from '../testing/protocol.js';
+
+const tick = () => new Promise<void>((r) => setTimeout(r, 10));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -187,5 +191,113 @@ describe('fromReadableStream', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(sink.values).toEqual([]);
     expect(sink.completed).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // Protocol
+  // -------------------------------------------------------------------------
+
+  it('delivers nothing before the first resume()', async () => {
+    const sink = testSink<number>();
+    pipe(fromReadableStream(readableStreamFrom([1])), assertProtocol()).connect(sink);
+    await tick();
+    expect(sink.values).toEqual([]);
+  });
+
+  it('repeated resume() while pulling does not duplicate or reorder values', async () => {
+    const sink = testSink<number>();
+    const s = pipe(fromReadableStream(readableStreamFrom([1, 2, 3])), assertProtocol()).connect(
+      sink,
+    );
+    s.resume();
+    s.resume();
+    await Promise.resolve();
+    s.resume();
+    await tick();
+    s.resume();
+    s.resume();
+    await tick();
+    expect(sink.values).toEqual([1, 2, 3]);
+    expect(sink.completeCount).toBe(1);
+  });
+
+  it('PAUSE on every value: exactly one value per resume(), then complete', async () => {
+    const sink = testSink<number>({ oracle: { integer: () => 1 } }); // always PAUSE
+    const s = pipe(fromReadableStream(readableStreamFrom([1, 2])), assertProtocol()).connect(
+      sink,
+    );
+    s.resume();
+    await tick();
+    expect(sink.values).toEqual([1]);
+    s.resume();
+    s.resume(); // extra resume while pulling is ignored
+    await tick();
+    expect(sink.values).toEqual([1, 2]);
+    expect(sink.completeCount).toBe(0);
+    s.resume();
+    await tick();
+    expect(sink.completeCount).toBe(1);
+    s.resume();
+    await tick();
+    expect(sink.values).toEqual([1, 2]);
+    expect(sink.completeCount).toBe(1);
+  });
+
+  it('dispose mid-flight: nothing more is delivered and the reader is cancelled', async () => {
+    let cancelled = false;
+    let index = 0;
+    const rs = new ReadableStream<number>({
+      pull(controller) {
+        controller.enqueue(index++);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const sink = testSink<number>({ oracle: { integer: () => 1 } });
+    const s = pipe(fromReadableStream(rs), assertProtocol()).connect(sink);
+    s.resume();
+    await tick();
+    expect(sink.values).toEqual([0]);
+    s.resume();
+    s[Symbol.dispose]();
+    await tick();
+    s.resume();
+    await tick();
+    expect(sink.values).toEqual([0]);
+    expect(sink.completeCount).toBe(0);
+    expect(cancelled).toBe(true);
+  });
+
+  it('a second connect() while locked errors on resume with a clear message', async () => {
+    const src = fromReadableStream(readableStreamFrom([1, 2]));
+    const first = testSink<number>();
+    src.connect(first);
+
+    const second = testSink<number>();
+    const s2 = pipe(src, assertProtocol()).connect(second);
+    expect(second.errors).toEqual([]); // nothing before resume
+    s2.resume();
+    s2.resume();
+    expect(second.errors).toHaveLength(1);
+    expect(second.errors[0]).toBeInstanceOf(TypeError);
+    expect((second.errors[0] as Error).message).toMatch(/locked/);
+  });
+
+  it('error after dispose is not delivered', async () => {
+    let controllerRef: ReadableStreamDefaultController<number> | undefined;
+    const rs = new ReadableStream<number>({
+      start(controller) {
+        controllerRef = controller;
+      },
+    });
+    const sink = testSink<number>();
+    const s = pipe(fromReadableStream(rs), assertProtocol()).connect(sink);
+    s.resume();
+    await tick();
+    s[Symbol.dispose]();
+    controllerRef!.error(new Error('late'));
+    await tick();
+    expect(sink.errors).toEqual([]);
   });
 });

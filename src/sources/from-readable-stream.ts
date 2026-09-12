@@ -6,6 +6,10 @@
 //
 // Zero buffering in the adapter — the ReadableStream's internal queue
 // is the only buffer.
+//
+// A ReadableStream can have only one reader, so the source is single-use:
+// a second connect() (while the first connection holds the lock) yields a
+// stream that delivers a clear error on resume().
 // ---------------------------------------------------------------------------
 
 import type { Sink, Stream, StreamableSource } from '../types.js';
@@ -16,6 +20,7 @@ class FromReadableStreamConnection<T> implements Stream {
   #reader: ReadableStreamDefaultReader<T>;
   #sink: Sink<T>;
   #disposed = false;
+  #terminated = false;
   #pulling = false;
 
   constructor(reader: ReadableStreamDefaultReader<T>, sink: Sink<T>) {
@@ -23,37 +28,71 @@ class FromReadableStreamConnection<T> implements Stream {
     this.#sink = sink;
   }
 
+  get #active(): boolean {
+    return !this.#disposed && !this.#terminated;
+  }
+
   resume(): void {
-    if (this.#disposed || this.#pulling) return;
+    if (!this.#active || this.#pulling) return;
     this.#pulling = true;
-    this.#pull();
+    // Exceptions thrown by the sink itself are not caught here — they
+    // surface as a rejection of the pull loop, exactly as a sink throwing
+    // into any other producer would.
+    void this.#pull();
   }
 
   async #pull(): Promise<void> {
-    try {
-      while (!this.#disposed) {
-        const { value, done } = await this.#reader.read();
-        if (this.#disposed) return;
-        if (done) {
-          this.#sink.complete();
-          return;
+    while (this.#active) {
+      let result: ReadableStreamReadResult<T>;
+      try {
+        result = await this.#reader.read();
+      } catch (err) {
+        if (this.#active) {
+          this.#terminated = true;
+          this.#sink.error(err);
         }
-        const result = this.#sink.next(value!);
-        if (result === PAUSE_SYM) {
-          this.#pulling = false;
-          return;
-        }
+        return;
       }
-    } catch (err) {
-      if (!this.#disposed) {
-        this.#sink.error(err);
+      if (!this.#active) return;
+      if (result.done) {
+        this.#terminated = true;
+        this.#sink.complete();
+        return;
+      }
+      const signal = this.#sink.next(result.value);
+      if (signal === PAUSE_SYM) {
+        this.#pulling = false;
+        return;
       }
     }
   }
 
   [Symbol.dispose](): void {
+    if (this.#disposed) return;
     this.#disposed = true;
-    this.#reader.cancel().catch(() => {});
+    if (!this.#terminated) {
+      this.#reader.cancel().catch(() => {});
+    }
+  }
+}
+
+/** Connection handed out when the stream's lock could not be acquired. */
+class LockedConnection implements Stream {
+  #done = false;
+
+  constructor(
+    private readonly sink: Sink<never>,
+    private readonly error: unknown,
+  ) {}
+
+  resume(): void {
+    if (this.#done) return;
+    this.#done = true;
+    this.sink.error(this.error);
+  }
+
+  [Symbol.dispose](): void {
+    this.#done = true;
   }
 }
 
@@ -63,7 +102,16 @@ class FromReadableStreamSource<T> extends AbstractSource<T> {
   }
 
   connect(sink: Sink<T>): Stream {
-    const reader = this.readable.getReader();
+    let reader: ReadableStreamDefaultReader<T>;
+    try {
+      reader = this.readable.getReader();
+    } catch (cause) {
+      const err = new TypeError(
+        'fromReadableStream(): the ReadableStream is locked — it can only be connected once',
+        { cause },
+      );
+      return new LockedConnection(sink, err);
+    }
     return new FromReadableStreamConnection(reader, sink);
   }
 }
@@ -79,6 +127,11 @@ class FromReadableStreamSource<T> extends AbstractSource<T> {
  * - Stream done → `sink.complete()`
  * - Stream error → `sink.error(err)`
  * - `[Symbol.dispose]` → `reader.cancel()`
+ *
+ * **Single-use.** A `ReadableStream` can be locked by only one reader, so
+ * the source can be connected once. A second `connect()` while the first
+ * connection is alive returns a stream that delivers a `TypeError` to
+ * `sink.error()` on `resume()`.
  *
  * @example
  * ```ts

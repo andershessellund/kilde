@@ -47,6 +47,15 @@ dependency, so the graph builds itself. `set` and `update` write; a write whose
 value is equal to the current one (structurally, via valsem's `deepEqual`)
 is dropped and nothing downstream runs.
 
+Structural equality is a deliberate default, and it has a cost and two
+caveats. Every write compares the old and new value, which is linear in the
+size of the value; a signal holding a large array pays for that on every
+`set`. `deepEqual` compares `Date`, `Map`, `Set` and class instances by
+reference, so those always count as changed. And a cyclic object overflows
+the stack. Pass `{ equals: Object.is }` (or any predicate) to `createSignal`,
+`computed`, `toSignal` and `createStore` when reference equality is what you
+want.
+
 Observe changes with `observe`. The callback receives the current value at
 once, then every change:
 
@@ -66,18 +75,36 @@ count.observe('value', render, microtaskScheduler);
 count.set(1); count.set(2); count.set(3); // render runs once, with 3
 ```
 
-Signals know whether anyone is watching. `signal.observed` is true while a
-subscriber or a dependent computed exists, and the `'activate'` and
-`'deactivate'` events fire on the transitions. That is what lets expensive
-sources stay cold until they are needed.
+Signals know whether anyone is watching. `signal.observed` is true while an
+observer exists, and the `'activate'` and `'deactivate'` events fire on the
+transitions. A plain read never counts: `computed(() => a() * 2)()` pulls the
+value without registering anything, so `a` stays unobserved and an expensive
+source behind `a` stays cold. Only `observe('value', ...)`, a connected
+stream, or a computed that is itself observed, makes a signal observed. That
+is what lets expensive sources stay cold until they are needed, and it also
+means a computed you create and read once is not retained by its
+dependencies.
 
-Two more forms are worth knowing:
+If an observer callback throws, the other observers still receive the update;
+the exception (or an `AggregateError` if several threw) is rethrown from the
+`set` that triggered delivery, or from the scheduler callback.
+
+A few more forms are worth knowing:
 
 - `linkedSignal(prev => ...)` is a writable signal with a derivation: it
   follows its dependencies until you write to it, and resumes following when
   they change again. Good for "selected item" state that must stay valid as
-  the list changes.
+  the list changes. `link(signal, fn)` attaches the same behaviour to an
+  existing writable signal.
 - `untracked(() => ...)` reads signals without registering dependencies.
+- `track(fn)` is the building block under `computed`: a tracking node with
+  an explicit dependent protocol, for code that integrates its own
+  scheduler or reconciler.
+- `SignalDeduplicator` is a keyed cache of signals with structural keys.
+  Entries evict themselves on `'deactivate'`, so use it from computeds that
+  are observed.
+- `observe('read', fn)` installs a hook that runs on every read of a signal.
+  It is what `link` uses to pull a derivation through; you rarely need it.
 
 ## Streams
 
@@ -93,15 +120,28 @@ stream(
 ```
 
 `stream(source, ...operators)` composes, connects, and returns the one
-synchronous result. `pipe(source, ...operators)` composes without connecting
-and hands back a `Source` for later. Operators are plain functions from
-`Source<T>` to `Source<R>`, so writing your own needs no base class.
+synchronous result. The pipeline must end in something that emits exactly one
+value and completes synchronously, such as `toArray`, `reduce`, or one of the
+bridges below; otherwise `stream` throws and releases the connection.
+`pipe(source, ...operators)` composes without connecting and hands back a
+`Source` for later. Operators are plain functions from `Source<T>` to
+`Source<R>`, so writing your own needs no base class. Everything is also
+available on one object, `Stream.map`, `Stream.fromArray` and so on, for code
+that prefers a namespace to named imports.
 
 The protocol underneath is small. A `Source<T>` has `connect(sink)`, which
 returns a paused `Stream`; `resume()` starts delivery. The sink's `next(value)`
 may return `PAUSE`, and the source then stops until the next `resume()`. That
 one return value is the whole backpressure story: async iterables, Web
 streams and Node streams all map onto it without buffering in between.
+
+The rules in full: nothing reaches the sink before the first `resume()`;
+after `PAUSE`, no `next()` until the next `resume()`; `complete()` and
+`error()` are not held back by `PAUSE` and may arrive while the sink is
+paused; after either of them nothing further arrives and `resume()` is a
+no-op. Operators that buffer for a paused consumer deliver the terminal
+event only after the buffer has drained. These are exactly the rules that `assertProtocol()` from
+`kilde/testing` checks; put it after your own operator in a test.
 
 ```ts
 import { stream, fromReadableStream, lines, toAsyncIterable } from 'kilde';
@@ -121,7 +161,9 @@ Bridges out of a pipeline: `toPromise()` (first value), `toCallback(fn)`
 
 Operators: `map`, `filter`, `take`, `scan`, `reduce`, `flatten`, `merge`,
 `switchMap`, `combineLatest`, `catchError`, `pausable`, `scheduleOn`, `lines`.
-Compose several into one with `comp(name, ...ops)`.
+Compose several into one with `comp(name, ...ops)`. `flatten` runs inner
+sources one at a time; `merge` runs them concurrently, so values from
+different inners may interleave while each inner's own order is kept.
 
 `createRelay<T>()` is both a source and a sink: push with `next`, and every
 connected subscriber receives the value through its own pausable buffer, so a
@@ -153,7 +195,9 @@ switch (result.tag) {
 `select` takes an object; the keys become the `tag` of the result, and the
 first choice that can proceed wins (ties go to key order). A branch may be a
 single choice or an array of choices for fan-in. Choices are awaitable on
-their own too: `await channelTake(ch)` gives the value directly.
+their own too: `await channelTake(ch)` gives the value directly. A `timeout`
+holds a timer only while a `select` is waiting on it, so a loop that creates
+one per iteration leaves nothing behind.
 
 Choices: `channelTake(ch)` (named so it does not collide with the stream
 operator `take`), `put(ch, value)`, `closed(ch)`, `timeout(ms)`,
@@ -282,8 +326,12 @@ exhaustiveTest((oracle) => {
 ```
 
 `testSource` and `testSink` consult a decision oracle at every point where
-they could pause, resume, or deliver; `exhaustiveTest` runs the body once per
-interleaving. If an operator has an ordering bug, this finds it.
+they could pause, resume, or deliver, including whether completion arrives
+while the sink is paused; `exhaustiveTest` runs the body once per
+interleaving. `assertProtocol()` is an operator that throws on any breach of
+the stream protocol. Put it after the operator under test and every
+interleaving becomes a conformance check. If an operator has an ordering
+bug, this finds it.
 
 ## Guarantees and requirements
 
@@ -292,6 +340,8 @@ interleaving. If an operator has an ordering bug, this finds it.
   last connection is disposed.
 - `PAUSE` is honoured by every built-in source and operator. A relay buffers
   per subscriber so a paused consumer does not stall the others.
+- A terminal event may arrive while a consumer is paused, and never after
+  another terminal event. Every built-in bridge is written to expect that.
 - Hot constructs registered with an owner are torn down exactly once, and any
   promise waiting on them rejects with `StreamDisposedError`.
 

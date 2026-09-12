@@ -673,3 +673,53 @@ describe('createRelay', () => {
     expect(sink.values).toEqual([1]); // Only got value before dispose
   });
 });
+
+// ---------------------------------------------------------------------------
+// stream() contract: exactly one value, completed synchronously
+// ---------------------------------------------------------------------------
+
+describe('stream() contract', () => {
+  it('throws when the final source emits more than one value', () => {
+    expect(() => stream(fromArray([1, 2, 3]))).toThrow(/emitted 3 values/);
+  });
+
+  it('throws and releases the connection when the source does not complete', () => {
+    let disposed = false;
+    const src = {
+      connect(sink: { next(v: number): unknown }) {
+        return { resume() { sink.next(1); }, [Symbol.dispose]() { disposed = true; } };
+      },
+    };
+    expect(() => stream(src)).toThrow(/did not complete/);
+    expect(disposed).toBe(true);
+  });
+
+  it('propagates an undefined error', () => {
+    const src = {
+      connect(sink: { error(e: unknown): void }) {
+        return { resume() { sink.error(undefined); }, [Symbol.dispose]() {} };
+      },
+    };
+    expect(() => stream(src)).toThrow();
+  });
+
+  it('comp() names the composed operator', () => {
+    const op = comp('doubleEvens', filter((n: number) => n % 2 === 0), map((n: number) => n * 2));
+    expect(op.name).toBe('doubleEvens');
+    expect(stream(fromArray([1, 2, 3, 4]), op, toArray())).toEqual([4, 8]);
+  });
+});
+
+describe('edge operators disposed from inside next()', () => {
+  it('do not complete after the sink disposed the stream', () => {
+    let completes = 0;
+    const handle: { s?: { resume(): void; [Symbol.dispose](): void } } = {};
+    handle.s = pipe(fromArray([1]), toArray()).connect({
+      next() { handle.s?.[Symbol.dispose](); return undefined; },
+      complete() { completes++; },
+      error() {},
+    });
+    handle.s.resume();
+    expect(completes).toBe(0);
+  });
+});

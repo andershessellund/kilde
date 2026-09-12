@@ -203,6 +203,86 @@ describe('createStore', () => {
     expect(sink1.values).toEqual([0]); // no further values
     expect(sink2.values).toEqual([0, 1]); // still receiving
   });
+
+  // ---------------------------------------------------------------------------
+  // Regression: connections are tracked per stream, not per sink identity
+  // ---------------------------------------------------------------------------
+
+  it('the same sink connected twice: disposing one stream keeps the other alive', () => {
+    const s = createStore(0);
+    const sink = recordSink<number>();
+    const a = s.connect(sink);
+    const b = s.connect(sink);
+    a.resume();
+    b.resume();
+    expect(sink.values).toEqual([0, 0]);
+
+    a[Symbol.dispose]();
+    s.set(1);
+    expect(sink.values).toEqual([0, 0, 1]); // b still receives
+
+    s[Symbol.dispose]();
+    expect(sink.completed).toBe(true); // the survivor is completed
+  });
+
+  it('the same sink connected twice is completed once per live stream on dispose', () => {
+    const s = createStore(0);
+    let completions = 0;
+    const sink: Sink<number> = {
+      next: () => undefined,
+      complete: () => {
+        completions++;
+      },
+      error() {},
+    };
+    s.connect(sink).resume();
+    s.connect(sink).resume();
+    s[Symbol.dispose]();
+    expect(completions).toBe(2);
+  });
+
+  it('store dispose does not complete a stream that was never resumed — it completes on its first resume', () => {
+    const s = createStore(0);
+    const sink = recordSink<number>();
+    const stream = s.connect(sink);
+    s[Symbol.dispose]();
+    expect(sink.completed).toBe(false); // nothing before the first resume()
+    stream.resume();
+    expect(sink.completed).toBe(true);
+    expect(sink.values).toEqual([]);
+  });
+
+  it('resume() after store dispose is a no-op (no double complete)', () => {
+    const s = createStore(0);
+    let completions = 0;
+    const sink: Sink<number> = {
+      next: () => undefined,
+      complete: () => {
+        completions++;
+      },
+      error() {},
+    };
+    const stream = s.connect(sink);
+    stream.resume();
+    s[Symbol.dispose]();
+    stream.resume();
+    stream.resume();
+    expect(completions).toBe(1);
+
+    // connect-after-dispose path is also idempotent
+    const late = s.connect(sink);
+    late.resume();
+    late.resume();
+    expect(completions).toBe(2);
+  });
+
+  it('store dispose releases the signal subscriptions', () => {
+    const s = createStore(0);
+    s.connect(recordSink<number>()).resume();
+    expect(s.observed).toBe(true);
+    s[Symbol.dispose]();
+    expect(s.observed).toBe(false);
+  });
 });
 
 // ===========================================================================

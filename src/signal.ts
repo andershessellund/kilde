@@ -85,51 +85,45 @@ export const immediateScheduler: Scheduler = {
 };
 
 /**
- * Microtask scheduler — defers to microtask queue.
- * Deduplicates: at most one pending microtask per scheduler instance.
+ * Build a scheduler that batches every callback handed to it into the next
+ * tick of `defer`. Each callback runs exactly once, in the order scheduled,
+ * as the `Scheduler` contract requires — two independent users of the same
+ * scheduler instance (say, the signal coordinator and a `scheduleOn`) must
+ * not overwrite each other.
  */
-export const microtaskScheduler: Scheduler = (() => {
+function batchingScheduler(defer: (tick: () => void) => void): Scheduler {
+  let queue: (() => void)[] = [];
   let pending = false;
-  let pendingCallback: (() => void) | null = null;
   return {
     schedule(callback: () => void) {
-      pendingCallback = callback;
+      queue.push(callback);
       if (pending) return;
       pending = true;
-      queueMicrotask(() => {
+      defer(() => {
         pending = false;
-        const cb = pendingCallback;
-        pendingCallback = null;
-        cb?.();
+        const batch = queue;
+        queue = [];
+        for (const cb of batch) cb();
       });
     },
   };
-})();
+}
+
+/**
+ * Microtask scheduler — defers to the microtask queue. Callbacks scheduled
+ * in the same tick run together in one microtask.
+ */
+export const microtaskScheduler: Scheduler = batchingScheduler(queueMicrotask);
 
 /**
  * Animation frame scheduler — defers to requestAnimationFrame.
  * Falls back to setTimeout in non-browser environments.
  */
-export const animationFrameScheduler: Scheduler = (() => {
-  let pending = false;
-  let pendingCallback: (() => void) | null = null;
-  const raf = typeof requestAnimationFrame === 'function'
-    ? requestAnimationFrame
-    : (cb: () => void) => setTimeout(cb, 16);
-  return {
-    schedule(callback: () => void) {
-      pendingCallback = callback;
-      if (pending) return;
-      pending = true;
-      raf(() => {
-        pending = false;
-        const cb = pendingCallback;
-        pendingCallback = null;
-        cb?.();
-      });
-    },
-  };
-})();
+export const animationFrameScheduler: Scheduler = batchingScheduler(
+  typeof requestAnimationFrame === 'function'
+    ? (cb) => requestAnimationFrame(() => cb())
+    : (cb) => setTimeout(cb, 16),
+);
 
 // ---------------------------------------------------------------------------
 // Dependency tracking — global stack for computed() auto-tracking
@@ -230,6 +224,8 @@ class SignalSubscription<T> {
   _sink: Sink<T>;
   _scheduler: Scheduler;
   _lastDeliveredVersion = -1;
+  /** Last value handed to the sink; a scheduled flush skips an equal one. */
+  _lastDeliveredValue: T | typeof UNSET = UNSET;
   _paused = true;
   _disposed = false;
 
@@ -344,13 +340,26 @@ function ensureFresh(node: SignalNode<any>): void {
   }
 
   if (stale) {
-    evaluate(node);
+    try {
+      evaluate(node);
+    } catch (err) {
+      // Not verified: the next read must evaluate (and throw) again rather
+      // than hand out the stale or UNSET value.
+      node._epoch = -1;
+      throw err;
+    }
   }
 }
 
 /**
  * Evaluate a computed node: run fn() with dependency tracking,
- * diff dependencies, update schedulerRefs, update value/version.
+ * diff dependencies, update value/version.
+ *
+ * Registration on dependencies (the push path) happens only while the node
+ * is observed — it has dependents of its own. An unobserved computed relies
+ * on the pull path alone (version comparison in ensureFresh), so a plain
+ * read never makes a signal `observed`, never fires `activate`, and never
+ * retains the computed from its dependencies.
  */
 function evaluate<T>(node: ComputedNode<T>): void {
   const prevTracking = tracking;
@@ -364,61 +373,99 @@ function evaluate<T>(node: ComputedNode<T>): void {
     tracking = prevTracking;
   }
 
-  // Diff dependencies
-  const oldDeps = node._depsVersions;
-
-  // Removed deps: unregister this node
-  for (const old of oldDeps.keys()) {
-    if (!deps.has(old)) {
-      old._dependents.delete(node);
-      // Retract scheduler refs upward
-      if (node._schedulerRefs) {
-        for (const [sched, count] of node._schedulerRefs) {
-          adjustSchedulerRef(old, sched, -count);
-        }
-      }
-      // Fire onUnobserved if last dependent removed
-      if (old._dependents.size === 0) {
-        if (old._onUnobservedCallbacks?.size) {
-          for (const cb of old._onUnobservedCallbacks) cb();
-        }
-        if (old instanceof ComputedNode) deactivateComputed(old);
-      }
-    }
-  }
-
-  // Added deps: register this node
-  for (const dep of deps) {
-    if (!oldDeps.has(dep)) {
-      const wasEmpty = dep._dependents.size === 0;
-      dep._dependents.add(node);
-      // Propagate scheduler refs upward
-      if (node._schedulerRefs) {
-        for (const [sched, count] of node._schedulerRefs) {
-          adjustSchedulerRef(dep, sched, count);
-        }
-      }
-      // Fire onObserved callbacks
-      if (wasEmpty && dep._onObservedCallbacks?.size) {
-        for (const cb of dep._onObservedCallbacks) cb();
-      }
-      // Activate computed deps that just got their first dependent
-      if (dep instanceof ComputedNode && wasEmpty) {
-        activateComputed(dep);
-      }
-    }
-  }
-
+  // Commit the result first. Edge maintenance below fires activate callbacks
+  // that may set() a dependency and flush synchronously; that flush must see
+  // the new dependency map (so a nested re-evaluation diffs against it, not
+  // against the old one) and the new version numbers (so a write during the
+  // callback is noticed by the next ensureFresh).
+  const previousDeps = node._depsVersions;
   node._depsVersions = new Map();
   for (const dep of deps) {
     node._depsVersions.set(dep, dep._version);
   }
-
-  // Update value + version
   node._initialized = true;
   if (node._value === UNSET || !node._equals(value, node._value as T)) {
     node._value = value;
     node._version++;
+  }
+
+  // Diff dependency edges. Registration (and the scheduler refs that travel
+  // with it) only exists while the node is observed. Each edge is checked
+  // against the live graph rather than the captured sets, because a nested
+  // evaluation triggered by a callback may already have done the work.
+  const active = node._dependents.size > 0;
+
+  for (const old of previousDeps.keys()) {
+    if (!deps.has(old)) {
+      if (old._dependents.has(node)) {
+        retractSchedulerRefs(node, old);
+        detachFromDep(node, old);
+      }
+    }
+  }
+
+  if (active) {
+    for (const dep of deps) {
+      if (!previousDeps.has(dep) && !dep._dependents.has(node)) {
+        propagateSchedulerRefs(node, dep);
+        attachToDep(node, dep);
+      }
+    }
+  }
+
+  // An activate callback may have written to a dependency that had no
+  // scheduler interest yet, so no flush will come to correct the value just
+  // committed. Re-evaluate now; the edges are attached, so this converges.
+  for (const [dep, ver] of node._depsVersions) {
+    if (dep._version !== ver) {
+      evaluate(node);
+      return;
+    }
+  }
+}
+
+/** Push `node`'s scheduler interest down a new dependency edge. */
+function propagateSchedulerRefs(node: ComputedNode<any>, dep: SignalNode<any>): void {
+  if (!node._schedulerRefs) return;
+  for (const [sched, count] of node._schedulerRefs) {
+    adjustSchedulerRef(dep, sched, count);
+  }
+}
+
+/** Withdraw `node`'s scheduler interest from a removed dependency edge. */
+function retractSchedulerRefs(node: ComputedNode<any>, dep: SignalNode<any>): void {
+  if (!node._schedulerRefs) return;
+  for (const [sched, count] of node._schedulerRefs) {
+    adjustSchedulerRef(dep, sched, -count);
+  }
+}
+
+/**
+ * Register `node` as a dependent of `dep`. Fires `dep`'s activate callbacks
+ * and activates `dep` itself (if computed) when this is its first dependent.
+ */
+function attachToDep(node: ComputedNode<any>, dep: SignalNode<any>): void {
+  const wasEmpty = dep._dependents.size === 0;
+  dep._dependents.add(node);
+  if (wasEmpty) {
+    if (dep instanceof ComputedNode) activateComputed(dep);
+    if (dep._onObservedCallbacks?.size) {
+      for (const cb of dep._onObservedCallbacks) cb();
+    }
+  }
+}
+
+/**
+ * Unregister `node` from `dep`. Fires `dep`'s deactivate callbacks and
+ * deactivates `dep` itself (if computed) when this was its last dependent.
+ */
+function detachFromDep(node: ComputedNode<any>, dep: SignalNode<any>): void {
+  dep._dependents.delete(node);
+  if (dep._dependents.size === 0) {
+    if (dep._onUnobservedCallbacks?.size) {
+      for (const cb of dep._onUnobservedCallbacks) cb();
+    }
+    if (dep instanceof ComputedNode) deactivateComputed(dep);
   }
 }
 
@@ -428,6 +475,10 @@ function flush(scheduler: Scheduler): void {
   pendingFlush.delete(scheduler);
   const state = getSchedulerState(scheduler);
   let iterations = 0;
+  // Exceptions thrown by computed functions or observers are collected so
+  // that one faulty node cannot starve its siblings of the update. They are
+  // rethrown together once delivery is done.
+  const errors: unknown[] = [];
 
   try {
     flushingScheduler = scheduler;
@@ -470,7 +521,14 @@ function flush(scheduler: Scheduler): void {
           state.pendingRecompute.clear();
           for (const comp of computeds) {
             const oldVersion = comp._version;
-            ensureFresh(comp);
+            try {
+              ensureFresh(comp);
+            } catch (err) {
+              // ensureFresh left the node unverified; the next read will
+              // evaluate again and surface the error to the reader.
+              errors.push(err);
+              continue;
+            }
             if (comp._version !== oldVersion) {
               // Value changed — cross-pollinate to ALL interested schedulers
               if (comp._schedulerRefs) {
@@ -491,15 +549,29 @@ function flush(scheduler: Scheduler): void {
       if (state.pendingNotify.size > 0) {
         const subs = [...state.pendingNotify];
         state.pendingNotify.clear();
-        for (const sub of subs) {
+        for (const sub of subs as SignalSubscription<any>[]) {
           if (sub._disposed) continue;
-          ensureFresh(sub._node);
-          if (sub._node._version > sub._lastDeliveredVersion) {
-            sub._lastDeliveredVersion = sub._node._version;
-            const result = sub._sink.next(sub._node._value as any);
-            if (result === PAUSE) {
-              sub._paused = true;
+          try {
+            ensureFresh(sub._node);
+            if (sub._node._version > sub._lastDeliveredVersion) {
+              sub._lastDeliveredVersion = sub._node._version;
+              const value = sub._node._value;
+              // A coalescing scheduler may see a value change and change
+              // back before it runs; the sink is owed nothing then.
+              if (
+                sub._lastDeliveredValue !== UNSET &&
+                sub._node._equals(value, sub._lastDeliveredValue)
+              ) {
+                continue;
+              }
+              sub._lastDeliveredValue = value;
+              const result = sub._sink.next(value);
+              if (result === PAUSE) {
+                sub._paused = true;
+              }
             }
+          } catch (err) {
+            errors.push(err);
           }
         }
       }
@@ -512,6 +584,11 @@ function flush(scheduler: Scheduler): void {
     state.changed.clear();
     state.pendingRecompute.clear();
     state.pendingNotify.clear();
+  }
+
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(errors, `${errors.length} errors were thrown during signal delivery`);
   }
 }
 
@@ -533,10 +610,12 @@ function adjustSchedulerRef(node: SignalNode<any>, scheduler: Scheduler, delta: 
     node._schedulerRefs.set(scheduler, next);
   }
 
-  // Propagate upward through this node's dependencies (if computed)
+  // Propagate upward along this node's registered dependency edges. An
+  // unregistered edge (the node is unobserved, or a nested evaluation has
+  // not attached it yet) carries no refs.
   if (node instanceof ComputedNode) {
     for (const dep of node._depsVersions.keys()) {
-      adjustSchedulerRef(dep, scheduler, delta);
+      if (dep._dependents.has(node)) adjustSchedulerRef(dep, scheduler, delta);
     }
   }
 }
@@ -552,17 +631,17 @@ function coordinatorSubscribe<T>(
   const wasEmpty = node._dependents.size === 0;
   node._dependents.add(sub);
 
-  // Propagate scheduler ref upward through the graph
+  // Propagate scheduler ref upward along registered edges. For a computed
+  // that is being activated there are none yet; activateComputed carries the
+  // ref down each edge as it registers it.
   adjustSchedulerRef(node, scheduler, +1);
 
-  // For computed nodes: activate (register on dependencies) if first dependent
-  if (node instanceof ComputedNode && wasEmpty) {
-    activateComputed(node);
-  }
-
-  // Fire onObserved callbacks
-  if (wasEmpty && node._onObservedCallbacks?.size) {
-    for (const cb of node._onObservedCallbacks) cb();
+  if (wasEmpty) {
+    // First dependent: a computed registers on its dependencies now
+    if (node instanceof ComputedNode) activateComputed(node);
+    if (node._onObservedCallbacks?.size) {
+      for (const cb of node._onObservedCallbacks) cb();
+    }
   }
 
   return sub;
@@ -578,37 +657,36 @@ function coordinatorUnsubscribe<T>(sub: SignalSubscription<T>): void {
   // Retract scheduler ref
   adjustSchedulerRef(node, sub._scheduler, -1);
 
-  // Check if node became unobserved
   if (node._dependents.size === 0) {
     if (node._onUnobservedCallbacks?.size) {
       for (const cb of node._onUnobservedCallbacks) cb();
     }
-    // For computed: deactivate (unregister from dependencies)
-    if (node instanceof ComputedNode) {
-      deactivateComputed(node);
-    }
+    if (node instanceof ComputedNode) deactivateComputed(node);
   }
 }
 
 // --- Computed liveness ---
 
+/**
+ * A computed gained its first dependent: register it on every dependency it
+ * read during its last evaluation, carrying its scheduler refs with it.
+ * Scheduler refs exist only along registered edges, so the graph walk in
+ * adjustSchedulerRef and the edge maintenance here never double count.
+ */
 function activateComputed(node: ComputedNode<any>): void {
-  // Register as dependent on all tracked deps
   for (const dep of node._depsVersions.keys()) {
-    dep._dependents.add(node);
+    if (dep._dependents.has(node)) continue;
+    propagateSchedulerRefs(node, dep);
+    attachToDep(node, dep);
   }
 }
 
+/** A computed lost its last dependent: unregister it from its dependencies. */
 function deactivateComputed(node: ComputedNode<any>): void {
   for (const dep of node._depsVersions.keys()) {
-    dep._dependents.delete(node);
-    if (dep._dependents.size === 0 && dep._onUnobservedCallbacks?.size) {
-      for (const cb of dep._onUnobservedCallbacks) cb();
-    }
-    // Recursively deactivate upstream computeds that lost their last dependent
-    if (dep instanceof ComputedNode && dep._dependents.size === 0) {
-      deactivateComputed(dep);
-    }
+    if (!dep._dependents.has(node)) continue;
+    retractSchedulerRefs(node, dep);
+    detachFromDep(node, dep);
   }
 }
 
@@ -638,6 +716,7 @@ function observeNode<T>(
   ensureFresh(node);
   if (node._value !== UNSET && node._version > sub._lastDeliveredVersion) {
     sub._lastDeliveredVersion = node._version;
+    sub._lastDeliveredValue = node._value;
     callback(node._value as T);
   }
 
@@ -722,9 +801,9 @@ class TrackerNode<T> {
   }
 
   _addDependent(dep: { _markDirty(): void }): void {
-    // Bridge the old _markDirty protocol to the new subscription model.
-    // Create a real subscription with immediateScheduler that calls _markDirty
-    // on delivery. This ensures schedulerRefs propagate correctly.
+    // A dependent is modelled as a subscription on the immediate scheduler
+    // whose delivery calls _markDirty. Going through the coordinator keeps
+    // liveness and scheduler refs correct.
     let sub = this.#bridges.get(dep);
     if (sub) return; // already registered
 
@@ -759,7 +838,9 @@ class TrackerNode<T> {
   }
 
   _markDirty(): void {
-    // Not used directly — exists for compatibility.
+    // A tracker has no dirty flag of its own: freshness is decided by
+    // version comparison on read. Present so a tracker satisfies the
+    // Dependent shape and can itself be registered on another tracker.
   }
 
   #bridges = new Map<{ _markDirty(): void }, SignalSubscription<T>>();

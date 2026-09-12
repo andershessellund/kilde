@@ -3,10 +3,14 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from 'vitest';
-import { stream } from '../stream.js';
+import type { Source, Sink } from '../types.js';
+import { stream, pipe } from '../stream.js';
 import { fromArray } from '../sources/from-array.js';
+import { createRelay } from '../relay.js';
 import { map } from './map.js';
 import { toReadableStream } from './to-readable-stream.js';
+import { testSink } from '../testing/test-sink.js';
+import { assertProtocol } from '../testing/protocol.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -22,6 +26,42 @@ async function collectReadableStream<T>(rs: ReadableStream<T>): Promise<T[]> {
     result.push(value!);
   }
   return result;
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+function tracked<T>(
+  source: Source<T>,
+): Source<T> & { connects: number; disposes: number; resumes: number; pauses: number } {
+  const t = {
+    connects: 0,
+    disposes: 0,
+    resumes: 0,
+    pauses: 0,
+    connect(sink: Sink<T>) {
+      t.connects++;
+      const s = source.connect({
+        next(v: T) {
+          const r = sink.next(v);
+          if (r !== undefined) t.pauses++;
+          return r;
+        },
+        complete: () => sink.complete(),
+        error: (e: unknown) => sink.error(e),
+      });
+      return {
+        resume: () => {
+          t.resumes++;
+          s.resume();
+        },
+        [Symbol.dispose]: () => {
+          t.disposes++;
+          s[Symbol.dispose]();
+        },
+      };
+    },
+  };
+  return t;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,28 +104,13 @@ describe('toReadableStream', () => {
   });
 
   it('cancellation disposes the upstream', async () => {
-    let disposed = false;
-    const src = fromArray([1, 2, 3, 4, 5]);
-    // Wrap to detect dispose
-    const wrappedSrc = {
-      connect(sink: any) {
-        const s = src.connect(sink);
-        return {
-          resume: () => s.resume(),
-          [Symbol.dispose]() {
-            disposed = true;
-            s[Symbol.dispose]();
-          },
-        };
-      },
-    };
-
-    const rs = stream(wrappedSrc as any, toReadableStream());
+    const src = tracked(fromArray([1, 2, 3, 4, 5]));
+    const rs = stream(src, toReadableStream());
     const reader = rs.getReader();
     await reader.read(); // read first value
     await reader.cancel();
 
-    expect(disposed).toBe(true);
+    expect(src.disposes).toBe(1);
   });
 
   it('handles many values with natural backpressure', async () => {
@@ -93,5 +118,61 @@ describe('toReadableStream', () => {
     const rs = stream(fromArray(values), toReadableStream());
     const result = await collectReadableStream(rs);
     expect(result).toEqual(values);
+  });
+
+  it('connects the upstream once and resumes it only while paused', async () => {
+    const src = tracked(fromArray([1, 2, 3]));
+    const rs = stream(src, toReadableStream());
+    expect(src.connects).toBe(0); // lazy: nothing until the first pull
+    const values = await collectReadableStream(rs);
+    expect(values).toEqual([1, 2, 3]);
+    expect(src.connects).toBe(1);
+    // Backpressure engaged, and the upstream was never resumed while it
+    // was still running (one resume to start, then one per PAUSE).
+    expect(src.pauses).toBeGreaterThan(0);
+    expect(src.resumes).toBeLessThanOrEqual(src.pauses + 1);
+  });
+
+  it('relay source: values pushed asynchronously are read in order', async () => {
+    const relay = createRelay<number>();
+    const rs = stream(relay, toReadableStream());
+    const reader = rs.getReader();
+    const first = reader.read();
+    await tick(); // the adapter connects lazily, on the first pull
+    relay.next(1);
+    expect(await first).toEqual({ value: 1, done: false });
+    relay.next(2);
+    relay.next(3);
+    relay.complete(); // arrives while the adapter is paused — queued chunks survive
+    expect(await reader.read()).toEqual({ value: 2, done: false });
+    expect(await reader.read()).toEqual({ value: 3, done: false });
+    expect(await reader.read()).toEqual({ value: undefined, done: true });
+  });
+
+  it('an error arriving while chunks are queued surfaces after they are read', async () => {
+    const src: Source<number> = {
+      connect(sink: Sink<number>) {
+        return {
+          resume() {
+            sink.next(1); // fills the queue (hwm 1) → PAUSE
+            sink.error(new Error('late')); // arrives while paused
+          },
+          [Symbol.dispose]() {},
+        };
+      },
+    };
+    const rs = stream(src, toReadableStream());
+    const reader = rs.getReader();
+    expect(await reader.read()).toEqual({ value: 1, done: false });
+    await expect(reader.read()).rejects.toThrow('late');
+  });
+
+  it('bug 12: a second resume() emits only one ReadableStream and one complete()', () => {
+    const sink = testSink<ReadableStream<number>>();
+    const s = pipe(fromArray([1]), toReadableStream(), assertProtocol()).connect(sink);
+    s.resume();
+    s.resume();
+    expect(sink.values).toHaveLength(1);
+    expect(sink.completeCount).toBe(1);
   });
 });

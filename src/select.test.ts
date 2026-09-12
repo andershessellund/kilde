@@ -236,3 +236,50 @@ describe('defaultChoice()', () => {
     // resolves without error
   });
 });
+
+// ---------------------------------------------------------------------------
+// timeout(): no timer outlives the select that used it
+// ---------------------------------------------------------------------------
+
+describe('timeout timer lifecycle', () => {
+  const activeTimeouts = () =>
+    process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+
+  it('clears its timer when the select settles on another branch', async () => {
+    const ch = createChannel<number>(1);
+    ch.putSync(1);
+    const before = activeTimeouts();
+    const t = timeout(60_000);
+    const result = await select({ v: take(ch), t });
+    expect(result.tag).toBe('v');
+    expect(activeTimeouts()).toBe(before);
+    // The deadline still stands: not due yet
+    expect(t.poll()).toBeUndefined();
+  });
+
+  it('holds no timer while nothing is waiting on it', () => {
+    const before = activeTimeouts();
+    timeout(60_000);
+    expect(activeTimeouts()).toBe(before);
+  });
+
+  it('fires from its creation time, not from when it is first awaited', async () => {
+    vi.useFakeTimers();
+    try {
+      const t = timeout(50);
+      vi.advanceTimersByTime(60);
+      // Never registered a timer, but the deadline has passed
+      const r = await select({ t, never: take(createChannel<number>()) });
+      expect(r.tag).toBe('t');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('can be awaited directly (then() is wired without side-effect imports)', async () => {
+    await timeout(1);
+    const ch = createChannel<number>();
+    ch.close();
+    await expect(Promise.resolve(defaultChoice())).resolves.toBeUndefined();
+  });
+});

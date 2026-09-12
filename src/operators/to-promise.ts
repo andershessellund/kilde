@@ -4,79 +4,64 @@
 // Resolves with the FIRST emitted value, then disposes the upstream.
 // Registers with the owner so that owner disposal rejects the promise with
 // StreamDisposedError instead of leaving it pending forever.
+//
+// The owner registration happens BEFORE the upstream is connected: a
+// source may end synchronously during the first resume(), and the sink
+// then unregisters — so the registration has to exist already.
 // ---------------------------------------------------------------------------
 
 import type { Source, Sink, Stream, Operator } from '../types.js';
-import { currentOwner } from '../owner.js';
+import { PAUSE } from '../types.js';
 import type { OwnedOptions } from '../owner.js';
 import { StreamDisposedError } from '../stream-disposed-error.js';
 import { AbstractSource } from '../abstract-source.js';
+import { registerWithOwner } from '../internal/owned.js';
+import { SingleValueStream } from '../internal/single-value-stream.js';
 
-class ToPromiseStream<T> implements Stream {
-  #disposed = false;
+/** Connect `source` and settle a promise with its first value. */
+function firstValue<T>(source: Source<T>, opts: OwnedOptions | undefined): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let upstream: Stream | undefined;
 
-  constructor(
-    private readonly sink: Sink<Promise<T>>,
-    private readonly source: Source<T>,
-    private readonly opts: OwnedOptions | undefined,
-  ) {}
+    const registration = registerWithOwner(opts?.owner, 'toPromise', () => {
+      if (settled) return;
+      settled = true;
+      upstream?.[Symbol.dispose]();
+      reject(new StreamDisposedError());
+    });
+    // The owner may already be disposed, in which case the teardown ran
+    // synchronously and there is nothing to connect.
+    if (settled) return;
 
-  resume(): void {
-    if (this.#disposed) return;
+    const settle = () => {
+      settled = true;
+      registration.unregister();
+    };
 
-    const promise = new Promise<T>((resolve, reject) => {
-      let settled = false;
-      let upstream: Stream | null = null;
-
-      const settle = () => {
-        settled = true;
-        handle?.unregister();
-      };
-
-      upstream = this.source.connect({
-        next(value: T): undefined {
-          if (settled) return undefined;
-          settle();
-          // Dispose upstream — we only need the first value
-          upstream?.[Symbol.dispose]();
-          resolve(value);
-          return undefined;
-        },
-        complete() {
-          if (settled) return;
-          settle();
-          reject(new Error('toPromise(): source completed without emitting a value'));
-        },
-        error(error: unknown) {
-          if (settled) return;
-          settle();
-          reject(error);
-        },
-      });
-
-      // Register with the owner. On disposal, reject the promise with
-      // StreamDisposedError and tear down the upstream.
-      const teardown = () => {
-        if (settled) return;
-        settled = true;
+    upstream = source.connect({
+      next(value: T): PAUSE {
+        if (settled) return PAUSE;
+        settle();
+        // Dispose upstream — we only need the first value
         upstream?.[Symbol.dispose]();
-        reject(new StreamDisposedError());
-      };
-      const handle = (this.opts?.owner ?? currentOwner()).register(
-        { [Symbol.dispose]: teardown },
-        'toPromise',
-      );
-
-      upstream.resume();
+        resolve(value);
+        return PAUSE;
+      },
+      complete() {
+        if (settled) return;
+        settle();
+        reject(new Error('toPromise(): source completed without emitting a value'));
+      },
+      error(error: unknown) {
+        if (settled) return;
+        settle();
+        reject(error);
+      },
     });
 
-    this.sink.next(promise);
-    this.sink.complete();
-  }
-
-  [Symbol.dispose](): void {
-    this.#disposed = true;
-  }
+    upstream.resume();
+  });
 }
 
 class ToPromiseSource<T> extends AbstractSource<Promise<T>> {
@@ -88,7 +73,7 @@ class ToPromiseSource<T> extends AbstractSource<Promise<T>> {
   }
 
   connect(sink: Sink<Promise<T>>): Stream {
-    return new ToPromiseStream(sink, this.source, this.opts);
+    return new SingleValueStream(sink, () => firstValue(this.source, this.opts));
   }
 }
 
@@ -102,6 +87,9 @@ class ToPromiseSource<T> extends AbstractSource<Promise<T>> {
  * The pending promise is registered with its owner (`opts.owner`, else the
  * ambient owner). Owner disposal rejects the promise with
  * `StreamDisposedError` and tears down the upstream connection.
+ *
+ * The upstream is connected on the first `resume()` of the returned
+ * stream; later `resume()` calls are no-ops.
  *
  * @example
  * ```ts

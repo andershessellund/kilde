@@ -7,26 +7,7 @@
 
 import type { Source, Sink, Stream, Operator } from '../types.js';
 import { AbstractSource } from '../abstract-source.js';
-
-class ToSourceStream<T> implements Stream {
-  #disposed = false;
-
-  constructor(
-    private readonly sink: Sink<Source<T>>,
-    private readonly wrappedSource: Source<T>,
-  ) {}
-
-  resume(): void {
-    if (!this.#disposed) {
-      this.sink.next(this.wrappedSource);
-      this.sink.complete();
-    }
-  }
-
-  [Symbol.dispose](): void {
-    this.#disposed = true;
-  }
-}
+import { SingleValueStream } from '../internal/single-value-stream.js';
 
 class ToSourceSource<T> extends AbstractSource<Source<T>> {
   constructor(private readonly source: Source<T>) {
@@ -34,7 +15,7 @@ class ToSourceSource<T> extends AbstractSource<Source<T>> {
   }
 
   connect(sink: Sink<Source<T>>): Stream {
-    return new ToSourceStream(sink, this.source);
+    return new SingleValueStream(sink, () => this.source);
   }
 }
 
@@ -43,6 +24,7 @@ class ToSourceSource<T> extends AbstractSource<Source<T>> {
  *
  * The upstream is NOT connected or consumed — it's wrapped as-is.
  * Useful for creating streams of sources (e.g., input to `flatten()`).
+ * The value is emitted once, on the first `resume()`.
  *
  * @example
  * ```ts

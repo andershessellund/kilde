@@ -6,143 +6,75 @@
 // string per line. Handles \n and \r\n. Trailing data without a
 // newline is emitted on complete.
 //
-// One-to-many: a single chunk may produce multiple lines. If downstream
-// returns PAUSE during emission, remaining lines are queued and drained
-// on resume.
+// One-to-many: a single chunk may produce multiple lines. Lines the
+// downstream cannot take yet are queued in a PauseBuffer and drained on
+// resume; a terminal event is delivered once the queue is empty.
 // ---------------------------------------------------------------------------
 
-import type { Source, Sink, Stream, Operator, PAUSE } from '../types.js';
-import { PAUSE as PAUSE_SYM } from '../types.js';
-import { AbstractSource } from '../abstract-source.js';
+import type { Sink, Operator } from '../types.js';
+import { PAUSE } from '../types.js';
+import { OperatorStream, OperatorSource } from '../internal/operator-stream.js';
+import { PauseBuffer } from '../internal/pause-buffer.js';
 
-class LinesStream implements Stream, Sink<string | Uint8Array> {
-  #upstream!: Stream;
+function stripCarriageReturn(line: string): string {
+  return line.endsWith('\r') ? line.slice(0, -1) : line;
+}
+
+class LinesStream extends OperatorStream<string | Uint8Array, string> {
+  readonly #buffer: PauseBuffer<string>;
   #decoder = new TextDecoder();
   #partial = '';
-  #queue: string[] = [];
-  #disposed = false;
-  #pendingComplete = false;
-  #pendingError: unknown;
-  #hasPendingError = false;
 
-  constructor(private readonly sink: Sink<string>) {}
-
-  _setUpstream(upstream: Stream): void {
-    this.#upstream = upstream;
+  constructor(sink: Sink<string>) {
+    super(sink);
+    this.#buffer = new PauseBuffer<string>({
+      next: (line: string) => this.emit(line),
+      complete: () => this.emitComplete(),
+      error: (error: unknown) => this.emitError(error),
+    });
   }
 
-  // --- Sink<string | Uint8Array> ---
-
-  next(chunk: string | Uint8Array): undefined | PAUSE {
-    if (this.#disposed) return PAUSE_SYM;
-
+  protected onValue(chunk: string | Uint8Array): undefined | PAUSE {
     const text = typeof chunk === 'string' ? chunk : this.#decoder.decode(chunk, { stream: true });
 
     this.#partial += text;
     const parts = this.#partial.split('\n');
     this.#partial = parts.pop()!; // last element is the incomplete tail
 
-    // Strip trailing \r for \r\n support
-    for (let i = 0; i < parts.length; i++) {
-      if (parts[i].endsWith('\r')) {
-        parts[i] = parts[i].slice(0, -1);
-      }
+    for (const part of parts) {
+      this.#buffer.push(stripCarriageReturn(part));
     }
 
-    this.#queue.push(...parts);
-    return this.#drain();
+    // Ask the upstream to wait whenever the downstream is paused, whether
+    // or not this chunk produced a line; resume() drains and then resumes.
+    return this.#buffer.paused ? PAUSE : undefined;
   }
 
-  complete(): void {
-    if (this.#disposed) return;
-
+  protected onComplete(): void {
     // Flush the TextDecoder
-    const remaining = this.#decoder.decode(new Uint8Array(0));
-    if (remaining) this.#partial += remaining;
+    this.#partial += this.#decoder.decode();
 
     // Emit trailing data as a final line
     if (this.#partial) {
-      // Strip trailing \r
-      if (this.#partial.endsWith('\r')) {
-        this.#partial = this.#partial.slice(0, -1);
-      }
-      if (this.#partial) {
-        this.#queue.push(this.#partial);
-      }
+      const last = stripCarriageReturn(this.#partial);
       this.#partial = '';
+      if (last) this.#buffer.push(last);
     }
 
-    if (this.#queue.length > 0) {
-      this.#pendingComplete = true;
-      // Drain what we can — if PAUSE, complete fires on resume
-      this.#drain();
-    } else {
-      this.sink.complete();
-    }
+    // Delivered now if nothing is queued, otherwise after the drain.
+    this.#buffer.complete();
   }
 
-  error(error: unknown): void {
-    if (this.#disposed) return;
-    if (this.#queue.length > 0) {
-      this.#hasPendingError = true;
-      this.#pendingError = error;
-    } else {
-      this.sink.error(error);
-    }
+  protected onError(error: unknown): void {
+    this.#buffer.error(error);
   }
 
-  // --- Stream ---
-
-  resume(): void {
-    if (this.#disposed) return;
-
-    // Drain queued lines first
-    if (this.#queue.length > 0) {
-      if (this.#drain() === PAUSE_SYM) return;
-    }
-
-    // Check deferred terminal events
-    if (this.#pendingComplete) {
-      this.sink.complete();
-      return;
-    }
-    if (this.#hasPendingError) {
-      this.sink.error(this.#pendingError);
-      return;
-    }
-
-    // Resume upstream
-    this.#upstream.resume();
+  protected onResume(): void {
+    if (this.#buffer.resume()) this.upstream.resume();
   }
 
-  [Symbol.dispose](): void {
-    this.#disposed = true;
-    this.#queue.length = 0;
-    this.#upstream[Symbol.dispose]();
-  }
-
-  // --- Private ---
-
-  #drain(): undefined | PAUSE {
-    while (this.#queue.length > 0) {
-      const line = this.#queue.shift()!;
-      const result = this.sink.next(line);
-      if (result === PAUSE_SYM) return PAUSE_SYM;
-    }
-    return undefined;
-  }
-}
-
-class LinesSource extends AbstractSource<string> {
-  constructor(private readonly source: Source<string | Uint8Array>) {
-    super();
-  }
-
-  connect(sink: Sink<string>): Stream {
-    const linesStream = new LinesStream(sink);
-    const upstream = this.source.connect(linesStream);
-    linesStream._setUpstream(upstream);
-    return linesStream;
+  protected onDispose(): void {
+    this.#buffer.dispose();
   }
 }
 
@@ -158,7 +90,8 @@ class LinesSource extends AbstractSource<string> {
  *
  * Supports backpressure: if downstream returns `PAUSE` during emission
  * of multiple lines from a single chunk, remaining lines are queued
- * and drained on `resume()`.
+ * and drained on `resume()`. Completion (or an error) is delivered only
+ * after every queued line has been delivered.
  *
  * @example
  * ```ts
@@ -180,5 +113,5 @@ class LinesSource extends AbstractSource<string> {
  * ```
  */
 export function lines(): Operator<string | Uint8Array, string> {
-  return (source) => new LinesSource(source);
+  return (source) => new OperatorSource(source, (sink) => new LinesStream(sink));
 }

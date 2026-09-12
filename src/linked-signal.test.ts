@@ -307,3 +307,20 @@ describe('linkedSignal', () => {
     expect(sig()).toBe(3); // source=2, prev=1 → 2+1=3
   });
 });
+
+describe('link() after a pushed derivation', () => {
+  it('keeps a manual override on the next read', () => {
+    const options = createSignal(['a', 'b']);
+    const sel = createSignal('a');
+    link(sel, (prev) => (options().includes(prev) ? prev : options()[0]), { registerResource: false });
+    const seen: string[] = [];
+    const stop = sel.observe('value', (v) => seen.push(v));
+
+    options.set(['d']); // pushed: sel becomes 'd'
+    expect(sel()).toBe('d');
+    sel.set('zz');
+    expect(sel()).toBe('zz');
+    expect(seen).toEqual(['a', 'd', 'zz']);
+    stop();
+  });
+});

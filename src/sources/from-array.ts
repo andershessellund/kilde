@@ -11,7 +11,9 @@ import { AbstractSource } from '../abstract-source.js';
 
 class FromArrayStream<T> implements Stream {
   #index = 0;
+  #completed = false;
   #disposed = false;
+  #delivering = false;
 
   constructor(
     private readonly sink: Sink<T>,
@@ -19,15 +21,20 @@ class FromArrayStream<T> implements Stream {
   ) {}
 
   resume(): void {
-    while (this.#index < this.array.length && !this.#disposed) {
-      const result = this.sink.next(this.array[this.#index++]);
-      if (result === PAUSE) {
-        return;
+    // A resume() re-entered from inside next() is a no-op: the outer loop
+    // is still delivering.
+    if (this.#completed || this.#disposed || this.#delivering) return;
+    this.#delivering = true;
+    try {
+      while (this.#index < this.array.length) {
+        const result = this.sink.next(this.array[this.#index++]);
+        if (this.#disposed || result === PAUSE) return;
       }
+    } finally {
+      this.#delivering = false;
     }
-    if (!this.#disposed && this.#index >= this.array.length) {
-      this.sink.complete();
-    }
+    this.#completed = true;
+    this.sink.complete();
   }
 
   [Symbol.dispose](): void {

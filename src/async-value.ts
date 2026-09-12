@@ -159,10 +159,8 @@ export function mapValue<T, U>(v: AsyncValue<T>, fn: (value: T) => U): AsyncValu
  *   unavailable > errored > loading > available
  *
  * If all inputs are `available`, returns `available` with a tuple of values.
- * Otherwise, returns the highest-precedence non-available state.
- *
- * Stale values are carried through: if a previous combined result is provided,
- * it becomes the stale value for `loading` or `errored` outputs.
+ * Otherwise, returns the highest-precedence non-available state. Stale values
+ * on the inputs are not combined; the result carries no `staleValue`.
  *
  * ```ts
  * combineValues(available(1), available('a'))         // available([1, 'a'])

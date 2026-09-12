@@ -9,19 +9,30 @@
 //
 // Zero buffering in the adapter — Node's internal highWaterMark buffer
 // is the only buffer.
+//
+// `null` is the end-of-stream marker for readable.push(), so a source value
+// of `null` cannot be represented: it destroys the Readable with an error.
 // ---------------------------------------------------------------------------
 
 import { Readable } from 'node:stream';
 import type { Source, Sink, Stream as StreamConnection, Operator, PAUSE } from '../types.js';
 import { PAUSE as PAUSE_SYM } from '../types.js';
 import { AbstractSource } from '../abstract-source.js';
+import { SingleValueStream } from '../internal/single-value-stream.js';
+
+function toError(err: unknown): Error {
+  return err instanceof Error ? err : new Error(String(err));
+}
 
 function sourceToReadable<T>(source: Source<T>): Readable {
   let conn: StreamConnection | undefined;
+  let terminated = false;
 
   const readable = new Readable({
     objectMode: true,
     read() {
+      // Sources treat resume() while already active as a no-op, so Node
+      // asking for more while we are still delivering is harmless.
       conn?.resume();
     },
     destroy(err, callback) {
@@ -32,16 +43,27 @@ function sourceToReadable<T>(source: Source<T>): Readable {
 
   conn = source.connect({
     next(value: T): undefined | PAUSE {
-      if (!readable.push(value)) {
+      if (terminated) return PAUSE_SYM;
+      if (value === null) {
+        terminated = true;
+        readable.destroy(
+          new TypeError(
+            'toReadable(): a source value of null cannot be pushed into a Readable — null is the end-of-stream marker',
+          ),
+        );
         return PAUSE_SYM;
       }
-      return undefined;
+      return readable.push(value) ? undefined : PAUSE_SYM;
     },
     complete() {
+      if (terminated) return;
+      terminated = true;
       readable.push(null);
     },
     error(err: unknown) {
-      readable.destroy(err instanceof Error ? err : new Error(String(err)));
+      if (terminated) return;
+      terminated = true;
+      readable.destroy(toError(err));
     },
   });
 
@@ -54,15 +76,13 @@ class ToReadableSource<T> extends AbstractSource<Readable> {
   }
 
   connect(sink: Sink<Readable>): StreamConnection {
-    const source = this.source;
-    return {
-      resume() {
-        const readable = sourceToReadable(source);
-        sink.next(readable);
-        sink.complete();
-      },
-      [Symbol.dispose]() {},
-    };
+    let readable: Readable | undefined;
+    return new SingleValueStream<Readable>(
+      sink,
+      () => (readable = sourceToReadable(this.source)),
+      // Tearing down the Readable disposes the upstream connection.
+      () => { if (readable && !readable.destroyed) readable.destroy(); },
+    );
   }
 }
 
@@ -84,6 +104,14 @@ class ToReadableSource<T> extends AbstractSource<Readable> {
  *
  * Zero buffering in the adapter — Node's internal `highWaterMark`
  * buffer (default 16 objects in object mode) is the only buffer.
+ *
+ * **`null` values are an error.** `readable.push(null)` is Node's
+ * end-of-stream marker, so a source that emits `null` cannot be represented;
+ * the Readable is destroyed with a `TypeError` and the upstream is disposed.
+ * Map such values to a sentinel first.
+ *
+ * The Readable is created once, on the first `resume()`. Disposing the
+ * connection destroys the Readable (and with it the upstream connection).
  *
  * Also exported as `sourceToReadable(source)` standalone function.
  */

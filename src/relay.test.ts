@@ -3,13 +3,15 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from 'vitest';
-import { pipe } from './stream.js';
+import { pipe, stream } from './stream.js';
 import { map } from './operators/map.js';
 import { filter } from './operators/filter.js';
 import { take } from './operators/take.js';
+import { toPromise } from './operators/to-promise.js';
 import { createRelay } from './relay.js';
 import { testSink } from './testing/test-sink.js';
 import { exhaustiveTest } from './testing/exhaustive.js';
+import { assertProtocol } from './testing/protocol.js';
 
 function drive(s: { resume(): void }, sink: { completeCount: number }, max = 40) {
   for (let i = 0; i < max && !sink.completeCount; i++) s.resume();
@@ -22,6 +24,7 @@ describe('relay (exhaustive)', () => {
       const mapped = pipe(
         relay,
         map((x) => x * 10),
+        assertProtocol(),
       );
       const sink = testSink<number>({ oracle });
       const s = mapped.connect(sink);
@@ -44,6 +47,7 @@ describe('relay (exhaustive)', () => {
       const filtered = pipe(
         relay,
         filter((x) => x % 2 === 0),
+        assertProtocol(),
       );
       const sink = testSink<number>({ oracle });
       const s = filtered.connect(sink);
@@ -64,7 +68,7 @@ describe('relay (exhaustive)', () => {
   it('relay through take — early termination', () => {
     exhaustiveTest((oracle) => {
       const relay = createRelay<number>();
-      const taken = pipe(relay, take(2));
+      const taken = pipe(relay, take(2), assertProtocol());
       const sink = testSink<number>({ oracle });
       const s = taken.connect(sink);
       s.resume();
@@ -84,8 +88,8 @@ describe('relay (exhaustive)', () => {
       const relay = createRelay<number>();
       const sink1 = testSink<number>({ oracle });
       const sink2 = testSink<number>({ oracle });
-      const s1 = relay.connect(sink1);
-      const s2 = relay.connect(sink2);
+      const s1 = pipe(relay, assertProtocol()).connect(sink1);
+      const s2 = pipe(relay, assertProtocol()).connect(sink2);
       s1.resume();
       s2.resume();
 
@@ -106,7 +110,7 @@ describe('relay (exhaustive)', () => {
     exhaustiveTest((oracle) => {
       const relay = createRelay<number>();
       const sink = testSink<number>({ oracle });
-      const s = relay.connect(sink);
+      const s = pipe(relay, assertProtocol()).connect(sink);
       s.resume();
 
       relay.next(1);
@@ -117,5 +121,111 @@ describe('relay (exhaustive)', () => {
       expect(sink.errors).toHaveLength(1);
       expect((sink.errors[0] as Error).message).toBe('relay-err');
     });
+  });
+
+  it('values pushed before the first resume are delivered on resume — all pause orderings', () => {
+    exhaustiveTest((oracle) => {
+      const relay = createRelay<number>();
+      const sink = testSink<number>({ oracle });
+      const s = pipe(relay, assertProtocol()).connect(sink);
+
+      relay.next(1);
+      relay.next(2);
+      relay.complete();
+      expect(sink.values).toEqual([]);
+
+      drive(s, sink);
+      expect(sink.values).toEqual([1, 2]);
+      expect(sink.completeCount).toBe(1);
+    });
+  });
+});
+
+describe('relay (bug 4 — terminal before the first resume)', () => {
+  it('a subscriber connecting after complete() gets complete() on its first resume, not inside connect()', () => {
+    const relay = createRelay<number>();
+    relay.complete();
+    const sink = testSink<number>();
+    const s = pipe(relay, assertProtocol()).connect(sink); // assertProtocol throws on delivery inside connect()
+    expect(sink.completeCount).toBe(0);
+    s.resume();
+    expect(sink.completeCount).toBe(1);
+    s.resume(); // no-op
+    expect(sink.completeCount).toBe(1);
+  });
+
+  it('a subscriber connecting after error() gets error() on its first resume', () => {
+    const relay = createRelay<number>();
+    relay.error(new Error('gone'));
+    const sink = testSink<number>();
+    const s = pipe(relay, assertProtocol()).connect(sink);
+    expect(sink.errors).toHaveLength(0);
+    s.resume();
+    expect(sink.errors).toHaveLength(1);
+  });
+
+  it('r.complete(); stream(r, toPromise()) rejects instead of crashing', async () => {
+    const r = createRelay<number>();
+    r.complete();
+    await expect(stream(r, toPromise())).rejects.toThrow('completed without emitting');
+  });
+});
+
+describe('relay (protocol)', () => {
+  it('resume() is idempotent and a no-op after the terminal', () => {
+    const relay = createRelay<number>();
+    const sink = testSink<number>();
+    const s = pipe(relay, assertProtocol()).connect(sink);
+    s.resume();
+    s.resume();
+    relay.next(1);
+    relay.complete();
+    expect(sink.values).toEqual([1]);
+    expect(sink.completeCount).toBe(1);
+    s.resume();
+    expect(sink.completeCount).toBe(1);
+  });
+
+  it('complete() while paused waits for the buffer to drain', () => {
+    const relay = createRelay<number>();
+    let pauseNext = true;
+    const sink = testSink<number>({ oracle: { integer: () => (pauseNext ? 1 : 0) } });
+    const s = pipe(relay, assertProtocol()).connect(sink);
+    s.resume();
+    relay.next(1);
+    relay.next(2);
+    relay.complete();
+    expect(sink.values).toEqual([1]);
+    expect(sink.completeCount).toBe(0);
+    pauseNext = false;
+    s.resume();
+    expect(sink.values).toEqual([1, 2]);
+    expect(sink.completeCount).toBe(1);
+  });
+
+  it('a disposed subscriber receives nothing more', () => {
+    const relay = createRelay<number>();
+    const sink = testSink<number>();
+    const s = relay.connect(sink);
+    s.resume();
+    relay.next(1);
+    s[Symbol.dispose]();
+    relay.next(2);
+    relay.complete();
+    s.resume();
+    expect(sink.values).toEqual([1]);
+    expect(sink.completeCount).toBe(0);
+  });
+
+  it('a subscriber that errors out of a paused buffer is not delivered twice', () => {
+    const relay = createRelay<number>();
+    const sink = testSink<number>({ oracle: { integer: () => 1 } });
+    const s = pipe(relay, assertProtocol()).connect(sink);
+    s.resume();
+    relay.next(1);
+    relay.error(new Error('x'));
+    expect(sink.errors).toHaveLength(1); // buffer was empty → delivered at once, while paused
+    s.resume();
+    expect(sink.errors).toHaveLength(1);
   });
 });

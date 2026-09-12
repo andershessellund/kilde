@@ -4,60 +4,43 @@
 // fromPromise(promise)  — wraps an existing PromiseLike into a Source.
 // fromAsyncFn(fn)       — creates a Source that calls fn() on each connect.
 //
-// Both deliver the resolved value on resume(). If the promise rejects,
-// delivers an error. Respects disposal — if disposed before the promise
-// settles, the result is silently discarded.
+// Both deliver the resolved value on resume(), then complete. If the promise
+// rejects, they deliver an error. Respects disposal — if disposed before the
+// promise settles, the result is silently discarded.
+//
+// Each connection is a PauseBuffer: the settlement is pushed into it when it
+// arrives (queued until the first resume), the value is delivered exactly
+// once, and the terminal event follows — at once if the sink did not pause,
+// otherwise on the next resume(). resume() is idempotent.
 // ---------------------------------------------------------------------------
 
 import type { Source, Sink, Stream } from '../types.js';
 import { AbstractSource } from '../abstract-source.js';
+import { PauseBuffer } from '../internal/pause-buffer.js';
 
 class PromiseStream<T> implements Stream {
-  #disposed = false;
-  #resumed = false;
-  #resolved = false;
-  #errored = false;
-  #result: T | undefined;
-  #error: unknown;
+  readonly #buffer: PauseBuffer<T>;
 
-  constructor(
-    private readonly sink: Sink<T>,
-    promise: PromiseLike<T>,
-  ) {
+  constructor(sink: Sink<T>, promise: PromiseLike<T>) {
+    this.#buffer = new PauseBuffer(sink);
     promise.then(
       (value) => {
-        if (this.#disposed) return;
-        this.#resolved = true;
-        this.#result = value;
-        if (this.#resumed) {
-          this.sink.next(value);
-          this.sink.complete();
-        }
+        // No-ops after dispose (the buffer is inactive).
+        this.#buffer.push(value);
+        this.#buffer.complete();
       },
       (err) => {
-        if (this.#disposed) return;
-        this.#errored = true;
-        this.#error = err;
-        if (this.#resumed) {
-          this.sink.error(err);
-        }
+        this.#buffer.error(err);
       },
     );
   }
 
   resume(): void {
-    if (this.#disposed) return;
-    this.#resumed = true;
-    if (this.#resolved) {
-      this.sink.next(this.#result!);
-      this.sink.complete();
-    } else if (this.#errored) {
-      this.sink.error(this.#error);
-    }
+    this.#buffer.resume();
   }
 
   [Symbol.dispose](): void {
-    this.#disposed = true;
+    this.#buffer.dispose();
   }
 }
 
@@ -77,7 +60,14 @@ class FromAsyncFnSource<T> extends AbstractSource<T> {
   }
 
   connect(sink: Sink<T>): Stream {
-    return new PromiseStream(sink, this.fn());
+    let promise: Promise<T>;
+    try {
+      promise = this.fn();
+    } catch (err) {
+      // A synchronous throw is treated like a rejection.
+      promise = Promise.reject(err);
+    }
+    return new PromiseStream(sink, promise);
   }
 }
 
@@ -85,7 +75,8 @@ class FromAsyncFnSource<T> extends AbstractSource<T> {
  * Create a source from an existing `PromiseLike`.
  *
  * The promise is already running — each `connect()` shares the same
- * settlement. The resolved value is delivered on `resume()`.
+ * settlement. The resolved value is delivered on `resume()`, followed by
+ * `complete()`; a rejection is delivered as `error()`.
  *
  * @example
  * ```ts
@@ -101,7 +92,9 @@ export function fromPromise<T>(promise: PromiseLike<T>): Source<T> {
  * Create a source from an async function.
  *
  * The function is called on each `connect()`, so each subscriber gets
- * its own promise. The resolved value is delivered on `resume()`.
+ * its own promise. The resolved value is delivered on `resume()`, followed
+ * by `complete()`; a rejection (or a synchronous throw from `fn`) is
+ * delivered as `error()`.
  *
  * @example
  * ```ts

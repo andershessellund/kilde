@@ -11,8 +11,9 @@
 // ---------------------------------------------------------------------------
 
 import type { Source, Sink, Stream } from './types.js';
-import { currentOwner } from './owner.js';
+import { PAUSE } from './types.js';
 import type { OwnedOptions } from './owner.js';
+import { registerWithOwner } from './internal/owned.js';
 import { StreamDisposedError } from './stream-disposed-error.js';
 
 export { StreamDisposedError } from './stream-disposed-error.js';
@@ -24,6 +25,9 @@ export { StreamDisposedError } from './stream-disposed-error.js';
  * When the owner is disposed, the connection is disposed and the sink
  * receives a `StreamDisposedError`. This ensures that promises or other
  * consumers waiting on the stream are notified rather than hanging forever.
+ * Disposing the returned handle yourself does the same: an unsettled sink
+ * receives `StreamDisposedError` so that whatever is waiting on it can
+ * finish. (A plain `source.connect()` stream tells the sink nothing.)
  *
  * With no owner, the connection is untracked — just like calling
  * `source.connect(sink)` directly — and the returned handle is the only way
@@ -42,51 +46,52 @@ export { StreamDisposedError } from './stream-disposed-error.js';
 export function connect<T>(source: Source<T>, sink: Sink<T>, opts?: OwnedOptions): Stream {
   let settled = false;
   let disposed = false;
+  let rawConn: Stream | null = null;
+
+  // Tear down, and tell a sink that has not settled yet. Used both for owner
+  // disposal and for explicit disposal of the returned handle.
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    registration.unregister();
+    rawConn?.[Symbol.dispose]();
+    if (!settled) {
+      settled = true;
+      sink.error(new StreamDisposedError());
+    }
+  };
+
+  // Register first: a source may settle synchronously during the first
+  // resume(), and the sink then unregisters — the handle must already exist.
+  const registration = registerWithOwner(opts?.owner, 'stream', dispose);
 
   // Wrap the sink to track settlement (complete or error)
   const trackedSink: Sink<T> = {
     next(value: T) {
+      if (settled || disposed) return PAUSE;
       return sink.next(value);
     },
     complete() {
+      if (settled) return;
       settled = true;
-      handle?.unregister();
+      registration.unregister();
       sink.complete();
     },
     error(err: unknown) {
+      if (settled) return;
       settled = true;
-      handle?.unregister();
+      registration.unregister();
       sink.error(err);
     },
   };
 
-  const rawConn = source.connect(trackedSink);
+  rawConn = source.connect(trackedSink);
 
-  // Wrap the connection to intercept external disposal
-  const trackedConn: Stream = {
+  return {
     resume() {
-      rawConn.resume();
+      if (settled || disposed) return;
+      rawConn!.resume();
     },
-    [Symbol.dispose]() {
-      if (disposed) return;
-      disposed = true;
-      handle?.unregister();
-      rawConn[Symbol.dispose]();
-
-      // If the stream hasn't settled yet, notify the sink
-      if (!settled) {
-        settled = true;
-        sink.error(new StreamDisposedError());
-      }
-    },
+    [Symbol.dispose]: dispose,
   };
-
-  // Register with the owner (graceful — untracked if the owner declines).
-  const dispose = () => trackedConn[Symbol.dispose]();
-  const handle = (opts?.owner ?? currentOwner()).register(
-    { [Symbol.dispose]: dispose },
-    'stream',
-  );
-
-  return trackedConn;
 }

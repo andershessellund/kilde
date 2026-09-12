@@ -6,12 +6,14 @@ import { describe, it, expect } from 'vitest';
 import type { Source, Sink } from './types.js';
 import { PAUSE } from './types.js';
 import { combineLatest } from './combine-latest.js';
+import { pipe } from './stream.js';
 import { createSignal } from './signal.js';
 import { createRelay } from './relay.js';
 import { fromArray } from './sources/from-array.js';
 import { testSource } from './testing/test-source.js';
 import { testSink } from './testing/test-sink.js';
 import { exhaustiveTest } from './testing/exhaustive.js';
+import { assertProtocol } from './testing/protocol.js';
 import { fromSignal } from './sources/from-signal.js';
 
 // ---------------------------------------------------------------------------
@@ -396,7 +398,7 @@ describe('combineLatest', () => {
       const a = testSource([1, 2], { oracle });
       const b = testSource([10, 20], { oracle });
       const sink = testSink<[number, number]>({ oracle });
-      const s = combineLatest([a, b]).connect(sink);
+      const s = pipe(combineLatest([a, b]), assertProtocol()).connect(sink);
       drive(s, sink);
 
       // Both sources emit all values. The final combined state must include
@@ -413,7 +415,7 @@ describe('combineLatest', () => {
       const b = testSource([2, 3], { oracle });
       const c = testSource([4], { oracle });
       const sink = testSink<[number, number, number]>({ oracle });
-      const s = combineLatest([a, b, c]).connect(sink);
+      const s = pipe(combineLatest([a, b, c]), assertProtocol()).connect(sink);
       drive(s, sink);
 
       const last = sink.values[sink.values.length - 1];
@@ -427,7 +429,7 @@ describe('combineLatest', () => {
       const a = testSource([1, 2], { oracle });
       const b = testSource<number>([], { oracle });
       const sink = testSink<[number, number]>({ oracle });
-      const s = combineLatest([a, b]).connect(sink);
+      const s = pipe(combineLatest([a, b]), assertProtocol()).connect(sink);
       drive(s, sink);
 
       // b never emits → no combined value ever produced
@@ -440,11 +442,89 @@ describe('combineLatest', () => {
     exhaustiveTest((oracle) => {
       const a = testSource([1, 2, 3], { oracle });
       const sink = testSink<[number]>({ oracle });
-      const s = combineLatest([a]).connect(sink);
+      const s = pipe(combineLatest([a]), assertProtocol()).connect(sink);
       drive(s, sink);
 
       expect(sink.values).toEqual([[1], [2], [3]]);
       expect(sink.completeCount).toBe(1);
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Bug 11 — completion while a tuple is owed
+  // ---------------------------------------------------------------------------
+
+  it('delivers the pending tuple on resume() before completing (bug 11)', () => {
+    const a = createRelay<number>();
+    const b = createRelay<string>();
+    const sink = pauseAfter<[number, string]>(1);
+    const s = combineLatest([a, b]).connect(sink);
+    s.resume();
+
+    a.next(1);
+    b.next('x'); // → [1, 'x'], sink pauses
+    a.next(2); // dirty while paused
+    a.complete();
+    b.complete(); // all inputs done, but [2, 'x'] is still owed
+    expect(sink.values).toEqual([[1, 'x']]);
+    expect(sink.completed).toBe(false);
+
+    s.resume();
+    expect(sink.values).toEqual([[1, 'x'], [2, 'x']]);
+    expect(sink.completed).toBe(true);
+  });
+
+  it('completes on resume() only after the owed tuple is accepted', () => {
+    // The sink pauses on every value: the owed tuple is delivered on the
+    // first resume(), completion follows on the same resume (a terminal
+    // event may follow a PAUSE).
+    const a = createRelay<number>();
+    const b = createRelay<string>();
+    const sink = testSink<[number, string]>({ oracle: { integer: () => 1 } });
+    const s = pipe(combineLatest([a, b]), assertProtocol()).connect(sink);
+    s.resume();
+    a.next(1);
+    b.next('x');
+    a.next(2);
+    a.complete();
+    b.complete();
+    expect(sink.completeCount).toBe(0);
+    s.resume();
+    expect(sink.values).toEqual([[1, 'x'], [2, 'x']]);
+    expect(sink.completeCount).toBe(1);
+    s.resume(); // no-op
+    expect(sink.completeCount).toBe(1);
+  });
+
+  it('completes immediately when inputs finish while paused with nothing owed', () => {
+    const a = createRelay<number>();
+    const b = createRelay<string>();
+    const sink = testSink<[number, string]>({ oracle: { integer: () => 1 } });
+    const s = pipe(combineLatest([a, b]), assertProtocol()).connect(sink);
+    s.resume();
+    a.next(1);
+    b.next('x'); // sink pauses
+    a.complete();
+    b.complete();
+    expect(sink.completeCount).toBe(1); // terminal while paused is fine
+  });
+
+  it('empty sources: resume() completes exactly once', () => {
+    const sink = testSink<[]>();
+    const s = pipe(combineLatest([]), assertProtocol()).connect(sink);
+    s.resume();
+    s.resume();
+    expect(sink.completeCount).toBe(1);
+  });
+
+  it('resume() after error is a no-op', () => {
+    const a = createRelay<number>();
+    const sink = testSink<[number]>();
+    const s = pipe(combineLatest([a]), assertProtocol()).connect(sink);
+    s.resume();
+    a.error(new Error('boom'));
+    expect(sink.errors).toHaveLength(1);
+    s.resume();
+    expect(sink.errors).toHaveLength(1);
   });
 });

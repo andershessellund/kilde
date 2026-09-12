@@ -3,12 +3,15 @@
 //
 // stream(source, ...ops) — apply operators, connect, resume, extract one
 //                          synchronous value. The final source must emit
-//                          exactly one value and complete synchronously.
+//                          exactly one value and complete synchronously;
+//                          otherwise stream() throws and releases the
+//                          connection.
 //
 // pipe(source, ...ops)   — pure lazy composition. Returns Source<R>.
 //                          No connect, no consume.
 //
-// comp(name, ...ops)     — compose multiple operators into a single operator.
+// comp(name, ...ops)     — compose multiple operators into a single, named
+//                          operator.
 // ---------------------------------------------------------------------------
 
 import type { Source, Sink, Operator } from './types.js';
@@ -19,13 +22,14 @@ import type { Source, Sink, Operator } from './types.js';
 
 class FinalReceiver<T> implements Sink<T> {
   value: T | undefined;
-  hasValue = false;
+  valueCount = 0;
   completed = false;
+  failed = false;
   receivedError: unknown;
 
   next(value: T): undefined {
     this.value = value;
-    this.hasValue = true;
+    this.valueCount++;
     return undefined;
   }
 
@@ -34,6 +38,7 @@ class FinalReceiver<T> implements Sink<T> {
   }
 
   error(error: unknown): void {
+    this.failed = true;
     this.receivedError = error;
   }
 }
@@ -133,17 +138,35 @@ export function stream(source: Source<any>, ...operators: Operator<any, any>[]):
     s = op(s);
   }
 
-  // Connect and extract
+  // Connect and extract. The final source must emit exactly one value and
+  // complete, all synchronously inside resume(). Anything else is a
+  // programming error: the connection is released and an Error is thrown.
   const receiver = new FinalReceiver();
   const connection = s.connect(receiver);
-  connection.resume();
+  try {
+    connection.resume();
+  } catch (err) {
+    connection[Symbol.dispose]();
+    throw err;
+  }
 
-  if (receiver.receivedError !== undefined) {
+  if (receiver.failed) {
+    connection[Symbol.dispose]();
     throw receiver.receivedError;
   }
 
-  if (!receiver.hasValue) {
-    throw new Error('stream(): source did not emit a value synchronously');
+  if (receiver.valueCount !== 1 || !receiver.completed) {
+    connection[Symbol.dispose]();
+    if (receiver.valueCount === 0) {
+      throw new Error('stream(): source did not emit a value synchronously');
+    }
+    if (receiver.valueCount > 1) {
+      throw new Error(
+        `stream(): source emitted ${receiver.valueCount} values; ` +
+          'end the pipeline with an operator that produces one (toArray, reduce, toPromise, ...)',
+      );
+    }
+    throw new Error('stream(): source emitted a value but did not complete synchronously');
   }
 
   return receiver.value;
@@ -332,12 +355,15 @@ export function comp<T, T1, T2, T3, T4, T5, T6, T7, T8, T9, R10>(
   op10: Operator<T9, R10>,
 ): Operator<T, R10>;
 export function comp(name: string, ...operators: Operator<any, any>[]): Operator<any, any>;
-export function comp(_name: string, ...operators: Operator<any, any>[]): Operator<any, any> {
-  return (source: Source<any>) => {
+export function comp(name: string, ...operators: Operator<any, any>[]): Operator<any, any> {
+  const composed = (source: Source<any>) => {
     let s: Source<any> = source;
     for (const op of operators) {
       s = op(s);
     }
     return s;
   };
+  // The name shows up in stack traces and debugger views of the pipeline.
+  Object.defineProperty(composed, 'name', { value: name, configurable: true });
+  return composed;
 }

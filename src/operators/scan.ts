@@ -2,79 +2,24 @@
 // scan — emit each intermediate accumulation
 // ---------------------------------------------------------------------------
 
-import type { Source, Sink, Stream, Operator } from '../types.js';
-import { PAUSE } from '../types.js';
-import { AbstractSource } from '../abstract-source.js';
+import type { Sink, Operator, PAUSE } from '../types.js';
+import { OperatorStream, OperatorSource } from '../internal/operator-stream.js';
 
-class ScanStream<T, R> implements Stream, Sink<T> {
+class ScanStream<T, R> extends OperatorStream<T, R> {
   #acc: R;
-  #disposed = false;
-  #upstream!: Stream;
 
   constructor(
-    private readonly sink: Sink<R>,
+    sink: Sink<R>,
     private readonly fn: (acc: R, value: T) => R,
     initial: R,
   ) {
+    super(sink);
     this.#acc = initial;
   }
 
-  _setUpstream(upstream: Stream): void {
-    this.#upstream = upstream;
-  }
-
-  // --- Sink<T> ---
-
-  next(value: T): undefined | typeof PAUSE {
-    if (this.#disposed) return PAUSE;
-    try {
-      this.#acc = this.fn(this.#acc, value);
-      return this.sink.next(this.#acc);
-    } catch (err) {
-      this.sink.error(err);
-      this.#upstream[Symbol.dispose]();
-      return PAUSE;
-    }
-  }
-
-  complete(): void {
-    if (!this.#disposed) {
-      this.sink.complete();
-    }
-  }
-
-  error(error: unknown): void {
-    if (!this.#disposed) {
-      this.sink.error(error);
-    }
-  }
-
-  // --- Stream ---
-
-  resume(): void {
-    this.#upstream.resume();
-  }
-
-  [Symbol.dispose](): void {
-    this.#disposed = true;
-    this.#upstream[Symbol.dispose]();
-  }
-}
-
-class ScanSource<T, R> extends AbstractSource<R> {
-  constructor(
-    private readonly source: Source<T>,
-    private readonly fn: (acc: R, value: T) => R,
-    private readonly initial: R,
-  ) {
-    super();
-  }
-
-  connect(sink: Sink<R>): Stream {
-    const scanStream = new ScanStream(sink, this.fn, this.initial);
-    const upstream = this.source.connect(scanStream);
-    scanStream._setUpstream(upstream);
-    return scanStream;
+  protected onValue(value: T): undefined | PAUSE {
+    this.#acc = this.fn(this.#acc, value);
+    return this.emit(this.#acc);
   }
 }
 
@@ -82,6 +27,7 @@ class ScanSource<T, R> extends AbstractSource<R> {
  * Accumulate values and emit each intermediate result.
  *
  * Like `reduce` but emits after every value, not just on complete.
+ * If `fn` throws, the error is sent downstream and the upstream is disposed.
  *
  * @example
  * ```ts
@@ -90,5 +36,5 @@ class ScanSource<T, R> extends AbstractSource<R> {
  * ```
  */
 export function scan<T, R>(fn: (acc: R, value: T) => R, initial: R): Operator<T, R> {
-  return (source) => new ScanSource(source, fn, initial);
+  return (source) => new OperatorSource(source, (sink) => new ScanStream(sink, fn, initial));
 }

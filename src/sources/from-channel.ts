@@ -10,6 +10,8 @@
 // channel's pending receiver queue.
 //
 // Completes when the channel is closed and all buffered values are drained.
+// "Completed" and "disposed" are tracked separately: completion deregisters
+// from the channel explicitly, and resume() after either is a no-op.
 // ---------------------------------------------------------------------------
 
 import type { Sink, Stream as StreamConnection, StreamableSource } from '../types.js';
@@ -31,7 +33,9 @@ import {
 
 class ChannelStream<T> implements StreamConnection {
   #disposed = false;
+  #completed = false;
   #paused = true;
+  #pulling = false;
   #pendingReceiver: PendingReceiver | null = null;
   #closeListener: (() => void) | null = null;
 
@@ -40,10 +44,14 @@ class ChannelStream<T> implements StreamConnection {
     private readonly impl: ChannelImpl<T>,
   ) {}
 
+  get #active(): boolean {
+    return !this.#disposed && !this.#completed;
+  }
+
   // --- Stream ---
 
   resume(): void {
-    if (this.#disposed) return;
+    if (!this.#active) return;
     this.#paused = false;
     this.#pull();
   }
@@ -59,29 +67,37 @@ class ChannelStream<T> implements StreamConnection {
 
   /** Try to take a value synchronously. If none available, register as pending receiver. */
   #pull(): void {
-    while (!this.#paused && !this.#disposed) {
-      const result = this.#tryTake();
+    // Guard against re-entrant resume() from inside sink.next().
+    if (this.#pulling) return;
+    this.#pulling = true;
+    try {
+      while (!this.#paused && this.#active) {
+        const result = this.#tryTake();
 
-      if (result !== undefined) {
-        const signal = this.sink.next(result.value);
-        if (signal === PAUSE) {
-          this.#paused = true;
+        if (result !== undefined) {
+          const signal = this.sink.next(result.value);
+          if (signal === PAUSE) {
+            this.#paused = true;
+            return;
+          }
+          // No PAUSE — loop to take the next value
+          continue;
+        }
+
+        // Nothing available — check if channel is closed + drained
+        if (this.impl[ChanClosed]) {
+          this.#completed = true;
+          this.#deregister();
+          this.sink.complete();
           return;
         }
-        // No PAUSE — loop to take the next value
-        continue;
-      }
 
-      // Nothing available — check if channel is closed + drained
-      if (this.impl[ChanClosed]) {
-        this.#disposed = true;
-        this.sink.complete();
+        // Register as pending receiver and wait
+        this.#registerReceiver();
         return;
       }
-
-      // Register as pending receiver and wait
-      this.#registerReceiver();
-      return;
+    } finally {
+      this.#pulling = false;
     }
   }
 
@@ -123,7 +139,7 @@ class ChannelStream<T> implements StreamConnection {
       notify: () => {
         this.#pendingReceiver = null;
         // Notified — data available or channel closed. Resume pull loop.
-        if (!this.#disposed && !this.#paused) {
+        if (this.#active && !this.#paused) {
           this.#pull();
         }
       },
@@ -138,7 +154,7 @@ class ChannelStream<T> implements StreamConnection {
         this.#closeListener = null;
         // Channel closed — if we're not paused, pull will drain and complete.
         // If we're paused, we'll drain on next resume.
-        if (!this.#disposed && !this.#paused) {
+        if (this.#active && !this.#paused) {
           this.#pull();
         }
       };
@@ -213,5 +229,3 @@ class ChannelSource<T> extends AbstractSource<T> {
 export function fromChannel<T>(ch: ReadChannel<T>): StreamableSource<T> {
   return new ChannelSource(ch as ChannelImpl<T>);
 }
-
-// Re-export Source type for the return type

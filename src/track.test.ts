@@ -114,17 +114,21 @@ describe('track', () => {
     ctrl._removeDependent(dep);
   });
 
-  it('registers on deps after first evaluation', () => {
+  it('does not register on deps until it has a dependent', () => {
     const a = createSignal(1);
     const ctrl = track(() => a());
 
-    // Before evaluation: not registered
     expect(a.observed).toBe(false);
-
     ctrl.runIfDirty();
 
-    // After evaluation: always registered on deps
+    // A plain evaluation pulls; it does not register (nothing is watching)
+    expect(a.observed).toBe(false);
+
+    const dep = dirtyCounter();
+    ctrl._addDependent(dep);
     expect(a.observed).toBe(true);
+    ctrl._removeDependent(dep);
+    expect(a.observed).toBe(false);
   });
 
   it('registers as dependent when it has dependents', () => {
@@ -387,13 +391,14 @@ describe('liveness propagation', () => {
     // Before evaluation: not connected
     expect(connected).toBe(false);
 
-    // Evaluation registers on deps → toSignal connects upstream
-    ctrl.runIfDirty();
-    expect(connected).toBe(true);
+    // A plain evaluation reads the initial value without connecting upstream
+    expect(ctrl.runIfDirty()).toBe(0);
+    expect(connected).toBe(false);
 
-    // Add dependent to receive dirty notifications
+    // Adding a dependent activates the tracker → toSignal connects upstream
     const dep = dirtyCounter();
     ctrl._addDependent(dep);
+    expect(connected).toBe(true);
 
     // Push value → sig updates → track gets dirty notification
     relay.next(5);

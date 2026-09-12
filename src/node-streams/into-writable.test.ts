@@ -9,7 +9,14 @@ import { stream } from '../stream.js';
 import { map } from '../operators/map.js';
 import { filter } from '../operators/filter.js';
 import { intoWritable, sourceIntoWritable } from './into-writable.js';
+import { PrematureCloseError } from './premature-close.js';
+import { StreamDisposedError } from '../stream-disposed-error.js';
+import { pipe } from '../stream.js';
+import { testSink } from '../testing/test-sink.js';
+import { assertProtocol } from '../testing/protocol.js';
 import type { Source, Sink, Stream as StreamConnection } from '../types.js';
+
+const tick = () => new Promise<void>((r) => setTimeout(r, 10));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -147,5 +154,151 @@ describe('sourceIntoWritable (standalone)', () => {
     const w = collectWritable();
     await sourceIntoWritable(fromArray([1, 2, 3]), w);
     expect(w.chunks).toEqual([1, 2, 3]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Lifecycle edge cases
+  // -------------------------------------------------------------------------
+
+  it("'close' before 'finish' rejects with PrematureCloseError and disposes the source", async () => {
+    let disposed = false;
+    const src: Source<number> = {
+      connect(sink) {
+        return {
+          resume() {
+            sink.next(1);
+          },
+          [Symbol.dispose]() {
+            disposed = true;
+          },
+        };
+      },
+    };
+    const w = collectWritable();
+    const promise = sourceIntoWritable(src, w);
+    await tick();
+    expect(w.chunks).toEqual([1]);
+    w.destroy(); // 'close' only, no 'finish'
+    await expect(promise).rejects.toBeInstanceOf(PrematureCloseError);
+    expect(disposed).toBe(true);
+  });
+
+  it('a synchronous throw from write() rejects, disposes the source and detaches', async () => {
+    let disposed = false;
+    let resumedAfterThrow = false;
+    let resumes = 0;
+    const src: Source<unknown> = {
+      connect(sink) {
+        return {
+          resume() {
+            resumes++;
+            if (resumes > 1) resumedAfterThrow = true;
+            sink.next(1);
+            sink.next(null); // ERR_STREAM_NULL_VALUES — thrown synchronously
+            sink.next(2);
+          },
+          [Symbol.dispose]() {
+            disposed = true;
+          },
+        };
+      },
+    };
+    const w = collectWritable();
+    const promise = sourceIntoWritable(src, w);
+    await expect(promise).rejects.toMatchObject({ code: 'ERR_STREAM_NULL_VALUES' });
+    expect(disposed).toBe(true);
+    expect(w.chunks).toEqual([1]); // the value after the throw is refused
+    expect(w.destroyed).toBe(true);
+    expect(w.listenerCount('drain')).toBe(0);
+    expect(w.listenerCount('finish')).toBe(0);
+    expect(w.listenerCount('close')).toBe(0);
+    await tick();
+    expect(resumedAfterThrow).toBe(false);
+  });
+
+  it('after settling, a late error on the writable does not crash', async () => {
+    const w = collectWritable();
+    await sourceIntoWritable(fromArray([1]), w);
+    expect(w.listenerCount('finish')).toBe(0);
+    expect(w.listenerCount('close')).toBe(0);
+    expect(() => w.emit('error', new Error('late'))).not.toThrow();
+  });
+
+  it('rejects immediately for an already-destroyed writable', async () => {
+    const w = collectWritable();
+    w.destroy();
+    let connected = false;
+    const src: Source<number> = {
+      connect() {
+        connected = true;
+        return { resume() {}, [Symbol.dispose]() {} };
+      },
+    };
+    await expect(sourceIntoWritable(src, w)).rejects.toBeInstanceOf(PrematureCloseError);
+    expect(connected).toBe(false);
+  });
+
+  it('rejects for an already-ended writable instead of hanging', async () => {
+    const w = collectWritable();
+    w.end();
+    await new Promise<void>((r) => w.once('finish', r));
+    await expect(sourceIntoWritable(fromArray<number>([]), w)).rejects.toThrow(/already ended/);
+  });
+});
+
+describe('intoWritable (operator connection)', () => {
+  it('starts once: repeated resume() emits a single promise', async () => {
+    const w = collectWritable();
+    const sink = testSink<Promise<void>>();
+    const conn = pipe(fromArray([1, 2]), intoWritable(w), assertProtocol()).connect(sink);
+    conn.resume();
+    conn.resume();
+    conn.resume();
+    expect(sink.values).toHaveLength(1);
+    expect(sink.completeCount).toBe(1);
+    await sink.values[0];
+    expect(w.chunks).toEqual([1, 2]);
+  });
+
+  it('dispose while running disconnects the source and rejects with StreamDisposedError', async () => {
+    let disposed = false;
+    const src: Source<number> = {
+      connect(sink) {
+        return {
+          resume() {
+            sink.next(1);
+          },
+          [Symbol.dispose]() {
+            disposed = true;
+          },
+        };
+      },
+    };
+    const w = collectWritable();
+    const sink = testSink<Promise<void>>();
+    const conn = pipe(src, intoWritable(w)).connect(sink);
+    conn.resume();
+    const promise = sink.values[0];
+    promise.catch(() => {});
+    conn[Symbol.dispose]();
+    expect(disposed).toBe(true);
+    await expect(promise).rejects.toBeInstanceOf(StreamDisposedError);
+    expect(w.destroyed).toBe(false); // the writable is left to its owner
+  });
+
+  it('dispose before resume: nothing starts', () => {
+    let connected = false;
+    const src: Source<number> = {
+      connect() {
+        connected = true;
+        return { resume() {}, [Symbol.dispose]() {} };
+      },
+    };
+    const sink = testSink<Promise<void>>();
+    const conn = pipe(src, intoWritable(collectWritable())).connect(sink);
+    conn[Symbol.dispose]();
+    conn.resume();
+    expect(connected).toBe(false);
+    expect(sink.values).toHaveLength(0);
   });
 });

@@ -11,12 +11,24 @@
 //
 // Options:
 //   close — whether to close the channel when the source ends (default: true)
+//   owner — who tears the pipe down (default: the ambient owner)
+//
+// Backpressure: when the channel cannot take a value, the value is parked
+// in the channel's pending-sender queue and the upstream is paused. The
+// channel calls the sender's notify() from inside the taker's poll — i.e.
+// from inside someone else's synchronous code. Resuming the upstream right
+// there would run the whole producer pipeline re-entrantly inside the
+// consumer's take, so the resume is deferred to a microtask.
+//
+// A terminal event that arrives while a value is parked is applied only
+// after that value has been taken: closing the channel would drop it.
 // ---------------------------------------------------------------------------
 
 import type { Source, Sink, Stream, Operator } from '../types.js';
 import { PAUSE } from '../types.js';
+import type { Terminal } from '../internal/pause-buffer.js';
 import type { WriteChannel } from '../channel.js';
-import type { ChannelImpl, PendingSender } from '../channel.js';
+import type { ChannelImpl } from '../channel.js';
 import {
   ChanBuf,
   ChanPendingSenders,
@@ -24,79 +36,105 @@ import {
   ChanCloseListeners,
   ChanClosed,
 } from '../channel.js';
+import type { OwnedOptions } from '../owner.js';
+import { StreamDisposedError } from '../stream-disposed-error.js';
 import { AbstractSource } from '../abstract-source.js';
+import { registerWithOwner } from '../internal/owned.js';
+import type { OwnedRegistration } from '../internal/owned.js';
+import { SingleValueStream } from '../internal/single-value-stream.js';
 
 // ---------------------------------------------------------------------------
 // Options
 // ---------------------------------------------------------------------------
 
-export interface IntoChannelOptions {
+export interface IntoChannelOptions extends OwnedOptions {
   /** Whether to close the channel when the source ends. Defaults to `true`. */
   close?: boolean;
 }
 
+
 // ---------------------------------------------------------------------------
-// IntoChannelStream — the active connection
+// pipeIntoChannel — the active pipe
 // ---------------------------------------------------------------------------
 
-class IntoChannelStream<T> implements Stream {
-  #disposed = false;
-  #teardown: (() => void) | null = null;
-
-  constructor(
-    private readonly outerSink: Sink<Promise<void>>,
-    private readonly source: Source<T>,
-    private readonly impl: ChannelImpl<T>,
-    private readonly closeOnEnd: boolean,
-  ) {}
-
-  resume(): void {
-    if (this.#disposed) return;
-
-    const impl = this.impl;
-    const closeOnEnd = this.closeOnEnd;
-    let upstream: Stream | null = null;
-
-    let resolveP!: () => void;
-    let rejectP!: (err: unknown) => void;
-    const promise = new Promise<void>((res, rej) => {
-      resolveP = res;
-      rejectP = rej;
-    });
-
+function pipeIntoChannel<T>(
+  source: Source<T>,
+  impl: ChannelImpl<T>,
+  closeOnEnd: boolean,
+  opts: OwnedOptions | undefined,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
     let settled = false;
-
-    const onExternalClose = () => {
-      if (upstream) upstream[Symbol.dispose]();
-      settle(() => resolveP());
-    };
+    let upstream: Stream | undefined;
+    // Assigned below; an already-disposed owner runs the teardown (and so
+    // settle()) synchronously inside registerWithOwner, before it exists.
+    let registration: OwnedRegistration | undefined;
+    // A value of ours is parked in the channel's pending-sender queue.
+    let parked = false;
+    // The source ended while a value was parked.
+    let deferredTerminal: Terminal | null = null;
 
     const settle = (fn: () => void) => {
       if (settled) return;
       settled = true;
       impl[ChanCloseListeners].delete(onExternalClose);
-      this.#teardown = null;
+      registration?.unregister();
       fn();
     };
 
-    this.#teardown = () => {
-      if (upstream) upstream[Symbol.dispose]();
-      settle(() => resolveP());
+    const onExternalClose = () => {
+      upstream?.[Symbol.dispose]();
+      settle(resolve);
     };
+
+    const end = (terminal: Terminal) => {
+      settle(() => {
+        if (closeOnEnd && !impl[ChanClosed]) impl.close();
+        if (terminal.kind === 'complete') resolve();
+        else reject(terminal.error);
+      });
+    };
+
+    // The channel took our parked value (or closed). Called from inside
+    // the taker's poll — defer everything to a microtask (see header).
+    const onParkedValueConsumed = () => {
+      parked = false;
+      queueMicrotask(() => {
+        if (settled) return;
+        if (impl[ChanClosed]) {
+          upstream?.[Symbol.dispose]();
+          settle(resolve);
+          return;
+        }
+        if (deferredTerminal) {
+          const terminal = deferredTerminal;
+          deferredTerminal = null;
+          end(terminal);
+          return;
+        }
+        upstream?.resume();
+      });
+    };
+
+    registration = registerWithOwner(opts?.owner, 'intoChannel', () => {
+      if (settled) return;
+      upstream?.[Symbol.dispose]();
+      settle(() => reject(new StreamDisposedError()));
+    });
+    if (settled) return; // owner already disposed
 
     // Channel already closed — resolve immediately
     if (impl[ChanClosed]) {
-      settle(() => resolveP());
-      this.outerSink.next(promise);
-      this.outerSink.complete();
+      settle(resolve);
       return;
     }
 
     const innerSink: Sink<T> = {
-      next(value: T): undefined | typeof PAUSE {
+      next(value: T): undefined | PAUSE {
+        if (settled) return PAUSE;
         if (impl[ChanClosed]) {
-          if (upstream) upstream[Symbol.dispose]();
-          settle(() => resolveP());
+          upstream?.[Symbol.dispose]();
+          settle(resolve);
           return PAUSE;
         }
 
@@ -116,54 +154,29 @@ class IntoChannelStream<T> implements Stream {
           return undefined;
         }
 
-        // Buffer full — register as pending sender and PAUSE
-        const sender: PendingSender<T> = {
-          value,
-          notify() {
-            if (upstream && !impl[ChanClosed]) {
-              upstream.resume();
-            } else if (upstream && impl[ChanClosed]) {
-              upstream[Symbol.dispose]();
-              settle(() => resolveP());
-            }
-          },
-        };
-        impl[ChanPendingSenders].push(sender);
+        // Buffer full — park the value as a pending sender and PAUSE
+        parked = true;
+        impl[ChanPendingSenders].push({ value, notify: onParkedValueConsumed });
         return PAUSE;
       },
 
       complete(): void {
-        settle(() => {
-          if (closeOnEnd && !impl[ChanClosed]) impl.close();
-          resolveP();
-        });
+        if (settled) return;
+        if (parked) deferredTerminal = { kind: 'complete' };
+        else end({ kind: 'complete' });
       },
 
       error(err: unknown): void {
-        settle(() => {
-          if (closeOnEnd && !impl[ChanClosed]) impl.close();
-          rejectP(err);
-        });
+        if (settled) return;
+        if (parked) deferredTerminal = { kind: 'error', error: err };
+        else end({ kind: 'error', error: err });
       },
     };
 
-    upstream = this.source.connect(innerSink);
-
-    if (!impl[ChanClosed]) {
-      impl[ChanCloseListeners].add(onExternalClose);
-    }
-
+    upstream = source.connect(innerSink);
+    impl[ChanCloseListeners].add(onExternalClose);
     upstream.resume();
-
-    this.outerSink.next(promise);
-    this.outerSink.complete();
-  }
-
-  [Symbol.dispose](): void {
-    if (this.#disposed) return;
-    this.#disposed = true;
-    this.#teardown?.();
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -175,12 +188,15 @@ class IntoChannelSource<T> extends AbstractSource<Promise<void>> {
     private readonly source: Source<T>,
     private readonly impl: ChannelImpl<T>,
     private readonly closeOnEnd: boolean,
+    private readonly opts: OwnedOptions | undefined,
   ) {
     super();
   }
 
   connect(sink: Sink<Promise<void>>): Stream {
-    return new IntoChannelStream(sink, this.source, this.impl, this.closeOnEnd);
+    return new SingleValueStream(sink, () =>
+      pipeIntoChannel(this.source, this.impl, this.closeOnEnd, this.opts),
+    );
   }
 }
 
@@ -195,11 +211,21 @@ class IntoChannelSource<T> extends AbstractSource<Promise<void>> {
  * completes or the channel is closed externally. Rejects if the source errors.
  *
  * Respects channel backpressure: when the channel buffer is full and no
- * receiver is waiting, the upstream source is paused via the `PAUSE` signal.
+ * receiver is waiting, the value is parked as a pending sender and the
+ * upstream source is paused via the `PAUSE` signal; once the value is
+ * taken, the upstream is resumed on the next microtask (never from inside
+ * the taker's own call). If the source ends while a value is parked, the
+ * channel is closed (and the promise settled) only after that value has
+ * been taken, so nothing is lost.
+ *
+ * The pipe is registered with its owner (`options.owner`, else the ambient
+ * owner). Owner disposal tears down the upstream and rejects the promise
+ * with `StreamDisposedError`; the channel is left open.
  *
  * @param ch — the target channel
  * @param options.close — whether to close the channel when the source ends
  *   (default: `true`)
+ * @param options.owner — owner that adopts the pipe (default: ambient owner)
  *
  * @example
  * ```ts
@@ -215,5 +241,5 @@ export function intoChannel<T>(
   options?: IntoChannelOptions,
 ): Operator<T, Promise<void>> {
   const closeOnEnd = options?.close ?? true;
-  return (source) => new IntoChannelSource(source, ch as ChannelImpl<T>, closeOnEnd);
+  return (source) => new IntoChannelSource(source, ch as ChannelImpl<T>, closeOnEnd, options);
 }

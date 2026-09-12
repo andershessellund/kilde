@@ -9,7 +9,15 @@
 //
 // Choices are awaitable — the then() mixin delegates to a single-choice
 // select, so `await take(ch)` works and returns just the value.
+//
+// choice.ts and select.ts import each other. That is safe because neither
+// uses the other's exports during module evaluation, only inside functions.
+// Importing select here (rather than wiring it in from select.ts at load
+// time) keeps `await timeout(ms)` working when a bundler tree-shakes modules
+// nothing else imports.
 // ---------------------------------------------------------------------------
+
+import { select } from './select.js';
 
 // ---------------------------------------------------------------------------
 // ChoiceAwaitValue — extracts the `.value` field for direct await
@@ -58,14 +66,6 @@ export const ChoiceDeadEnd: unique symbol = Symbol('choice.deadEnd');
 // makeAwaitable — mixin that adds then()
 // ---------------------------------------------------------------------------
 
-// Forward declaration — selectOne is provided by select.ts to break the cycle
-let _selectOne: <T>(choice: Choice<T>) => Promise<ChoiceAwaitValue<T>>;
-
-/** @internal Called by select.ts to wire up the selectOne implementation. */
-export function _setSelectOne(fn: <T>(choice: Choice<T>) => Promise<ChoiceAwaitValue<T>>): void {
-  _selectOne = fn;
-}
-
 /**
  * Add a `then()` method to a choice, making it directly awaitable.
  *
@@ -81,7 +81,9 @@ export function makeAwaitable<T>(choice: {
     onFulfilled?: ((value: ChoiceAwaitValue<T>) => any) | null,
     onRejected?: ((reason: unknown) => any) | null,
   ): Promise<any> {
-    return _selectOne(this as Choice<T>).then(onFulfilled, onRejected);
+    return select({ _: this as Choice<T> })
+      .then((r) => (r as unknown as { value: ChoiceAwaitValue<T> }).value)
+      .then(onFulfilled, onRejected);
   };
   return choice as Choice<T>;
 }

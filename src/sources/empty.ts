@@ -4,33 +4,19 @@
 
 import type { Sink, Stream, StreamableSource } from '../types.js';
 import { AbstractSource } from '../abstract-source.js';
-
-class EmptyStream implements Stream {
-  #disposed = false;
-
-  constructor(private readonly sink: Sink<unknown>) {}
-
-  resume(): void {
-    if (!this.#disposed) {
-      this.sink.complete();
-    }
-  }
-
-  [Symbol.dispose](): void {
-    this.#disposed = true;
-  }
-}
+import { completeOnResume } from '../internal/complete-on-resume.js';
 
 class EmptySource<T> extends AbstractSource<T> {
   connect(sink: Sink<T>): Stream {
-    return new EmptyStream(sink);
+    return completeOnResume(sink);
   }
 }
 
 const EMPTY_SOURCE = new EmptySource<any>();
 
 /**
- * Create a source that immediately completes on resume, emitting no values.
+ * Create a source that completes on its first `resume()`, emitting no
+ * values. Later `resume()` calls do nothing.
  *
  * @example
  * ```ts

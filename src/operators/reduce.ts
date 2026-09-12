@@ -5,85 +5,38 @@
 //   stream(fromArray([1,2,3]), reduce((a,b) => a+b, 0)) → 6
 // ---------------------------------------------------------------------------
 
-import type { Source, Sink, Stream, Operator } from '../types.js';
-import { PAUSE } from '../types.js';
-import { AbstractSource } from '../abstract-source.js';
+import type { Sink, Operator, PAUSE } from '../types.js';
+import { OperatorStream, OperatorSource } from '../internal/operator-stream.js';
 
-class ReduceStream<T, R> implements Stream, Sink<T> {
+class ReduceStream<T, R> extends OperatorStream<T, R> {
   #acc: R;
-  #disposed = false;
-  #upstream!: Stream;
 
   constructor(
-    private readonly sink: Sink<R>,
+    sink: Sink<R>,
     private readonly fn: (acc: R, value: T) => R,
     initial: R,
   ) {
+    super(sink);
     this.#acc = initial;
   }
 
-  _setUpstream(upstream: Stream): void {
-    this.#upstream = upstream;
+  protected onValue(value: T): undefined | PAUSE {
+    this.#acc = this.fn(this.#acc, value);
+    return undefined; // Never pause — consume everything
   }
 
-  // --- Sink<T> ---
-
-  next(value: T): undefined | typeof PAUSE {
-    if (this.#disposed) return PAUSE;
-    try {
-      this.#acc = this.fn(this.#acc, value);
-      return undefined; // Never pause — consume everything
-    } catch (err) {
-      this.sink.error(err);
-      this.#upstream[Symbol.dispose]();
-      return PAUSE;
-    }
-  }
-
-  complete(): void {
-    if (!this.#disposed) {
-      this.sink.next(this.#acc);
-      this.sink.complete();
-    }
-  }
-
-  error(error: unknown): void {
-    if (!this.#disposed) {
-      this.sink.error(error);
-    }
-  }
-
-  // --- Stream ---
-
-  resume(): void {
-    this.#upstream.resume();
-  }
-
-  [Symbol.dispose](): void {
-    this.#disposed = true;
-    this.#upstream[Symbol.dispose]();
-  }
-}
-
-class ReduceSource<T, R> extends AbstractSource<R> {
-  constructor(
-    private readonly source: Source<T>,
-    private readonly fn: (acc: R, value: T) => R,
-    private readonly initial: R,
-  ) {
-    super();
-  }
-
-  connect(sink: Sink<R>): Stream {
-    const reduceStream = new ReduceStream(sink, this.fn, this.initial);
-    const upstream = this.source.connect(reduceStream);
-    reduceStream._setUpstream(upstream);
-    return reduceStream;
+  protected onComplete(): void {
+    // The result is the last thing we say; completing right after a PAUSE
+    // is allowed (terminal events are not governed by PAUSE).
+    this.emit(this.#acc);
+    this.emitComplete();
   }
 }
 
 /**
  * Accumulate all values, emitting a single result on complete.
+ *
+ * If `fn` throws, the error is sent downstream and the upstream is disposed.
  *
  * As the last argument to `stream()`, acts as a synchronous collector:
  * ```ts
@@ -96,5 +49,5 @@ class ReduceSource<T, R> extends AbstractSource<R> {
  * ```
  */
 export function reduce<T, R>(fn: (acc: R, value: T) => R, initial: R): Operator<T, R> {
-  return (source) => new ReduceSource(source, fn, initial);
+  return (source) => new OperatorSource(source, (sink) => new ReduceStream(sink, fn, initial));
 }

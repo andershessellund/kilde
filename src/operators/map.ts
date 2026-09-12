@@ -2,74 +2,22 @@
 // map — transform each value
 // ---------------------------------------------------------------------------
 
-import type { Source, Sink, Stream, Operator } from '../types.js';
-import { PAUSE } from '../types.js';
-import { AbstractSource } from '../abstract-source.js';
+import type { Sink, Operator, PAUSE } from '../types.js';
+import { OperatorStream, OperatorSource } from '../internal/operator-stream.js';
 
-class MapStream<T, R> implements Stream, Sink<T> {
-  #disposed = false;
-  #upstream!: Stream;
-
+class MapStream<T, R> extends OperatorStream<T, R> {
   constructor(
-    private readonly sink: Sink<R>,
-    private readonly fn: (value: T) => R,
-  ) {}
-
-  _setUpstream(upstream: Stream): void {
-    this.#upstream = upstream;
-  }
-
-  // --- Sink<T> (receives from upstream) ---
-
-  next(value: T): undefined | typeof PAUSE {
-    if (this.#disposed) return PAUSE;
-    try {
-      const mapped = this.fn(value);
-      return this.sink.next(mapped);
-    } catch (err) {
-      this.sink.error(err);
-      this.#upstream[Symbol.dispose]();
-      return PAUSE;
-    }
-  }
-
-  complete(): void {
-    if (!this.#disposed) {
-      this.sink.complete();
-    }
-  }
-
-  error(error: unknown): void {
-    if (!this.#disposed) {
-      this.sink.error(error);
-    }
-  }
-
-  // --- Stream (exposed to downstream) ---
-
-  resume(): void {
-    this.#upstream.resume();
-  }
-
-  [Symbol.dispose](): void {
-    this.#disposed = true;
-    this.#upstream[Symbol.dispose]();
-  }
-}
-
-class MapSource<T, R> extends AbstractSource<R> {
-  constructor(
-    private readonly source: Source<T>,
+    sink: Sink<R>,
     private readonly fn: (value: T) => R,
   ) {
-    super();
+    super(sink);
   }
 
-  connect(sink: Sink<R>): Stream {
-    const mapStream = new MapStream(sink, this.fn);
-    const upstream = this.source.connect(mapStream);
-    mapStream._setUpstream(upstream);
-    return mapStream;
+  protected onValue(value: T): undefined | PAUSE {
+    // Only `fn` is operator logic; a throwing downstream sink propagates
+    // to the producer (see OperatorStream).
+    const mapped = this.fn(value);
+    return this.emit(mapped);
   }
 }
 
@@ -85,5 +33,5 @@ class MapSource<T, R> extends AbstractSource<R> {
  * ```
  */
 export function map<T, R>(fn: (value: T) => R): Operator<T, R> {
-  return (source) => new MapSource(source, fn);
+  return (source) => new OperatorSource(source, (sink) => new MapStream(sink, fn));
 }

@@ -247,7 +247,13 @@ export function createOwner(name?: string): OwnerScope {
     },
     [Symbol.dispose]() {
       const { pending, errors } = disposeAll();
-      if (pending.length > 0) void Promise.all(pending);
+      // Asynchronous disposers cannot be awaited from a synchronous dispose.
+      // Each failure surfaces as its own unhandled rejection (so
+      // `process.on('unhandledRejection')` handlers see it) instead of being
+      // swallowed or thrown out of this call.
+      for (const p of pending) {
+        p.catch((err) => void Promise.reject(err));
+      }
       raise(errors);
     },
     [Symbol.asyncDispose]() {

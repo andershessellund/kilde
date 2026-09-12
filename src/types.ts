@@ -29,7 +29,22 @@ export type PAUSE = typeof PAUSE;
  * - `complete()` — no more values will be sent.
  * - `error(err)` — an error occurred; no more values.
  *
- * After `complete()` or `error()` is called, no further calls are made.
+ * The protocol between a source and its sink:
+ *
+ * 1. A source makes no calls on the sink before the first `resume()` on
+ *    the stream returned by `connect()`.
+ * 2. After `next()` returns `PAUSE`, the source sends no further `next()`
+ *    until `resume()` is called again.
+ * 3. `PAUSE` governs `next()` only. `complete()` and `error()` may be
+ *    delivered at any time after the first `resume()`, **including while
+ *    paused**. A sink that returns `PAUSE` must therefore be prepared to
+ *    receive a terminal event before it resumes.
+ * 4. After `complete()` or `error()` no further calls of any kind are
+ *    made, and `resume()` on the stream is a no-op.
+ *
+ * Operators that buffer values for a paused downstream deliver a terminal
+ * event only after the buffer has drained, so a sink never observes a
+ * terminal event ahead of a value it was already owed.
  */
 export interface Sink<T> {
   next(value: T): undefined | PAUSE;
@@ -47,6 +62,8 @@ export interface Sink<T> {
  * Streams start **paused**. Call `resume()` to begin receiving values.
  * After `resume()`, the source pushes values to the connected sink until
  * the sink returns `PAUSE`, the source completes, or an error occurs.
+ * Calling `resume()` while already delivering, or after the stream has
+ * completed, errored, or been disposed, is a no-op.
  *
  * Implements the standard `Disposable` protocol via `[Symbol.dispose]`.
  */
@@ -284,7 +301,7 @@ export interface Store<T> extends WritableSignal<T> {
   /** Whether the store has been disposed. */
   readonly disposed: boolean;
 
-  /** Connect a sink — stream protocol for backward compatibility. */
+  /** Connect a sink. Delivers the current value on `resume()`, then each change. */
   connect(sink: Sink<T>): Stream;
 
   /** Dispose the store: complete all subscribers, reject pending intoStore promises. */

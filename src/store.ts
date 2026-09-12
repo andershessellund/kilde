@@ -8,18 +8,73 @@
 // intoStore(store, reducer)  — operator: pipe a source into a store
 // ---------------------------------------------------------------------------
 
-import type { Source, Sink, Stream, Store, Scheduler } from './types.js';
+import type { Source, Sink, Stream, Store, Scheduler, WritableSignal } from './types.js';
 import { createSignal, SIGNAL_BRAND } from './signal.js';
 import { fromSignal } from './sources/from-signal.js';
+import { completeOnResume } from './internal/complete-on-resume.js';
+
+// ---------------------------------------------------------------------------
+// StoreStream — one connection to a store
+//
+// Wraps a fromSignal() connection and adds the store's lifecycle: when the
+// store is disposed the sink is completed — right away if the stream has
+// been resumed, otherwise on its first resume() (a sink must not hear
+// anything before the first resume). Each connection is tracked by
+// identity, so the same sink connected twice gets two independent streams.
+// ---------------------------------------------------------------------------
+
+class StoreStream<T> implements Stream {
+  #started = false;
+  #terminated = false;
+  #disposed = false;
+  /** Set when the store was disposed before this stream was resumed. */
+  #completeOnResume = false;
+
+  constructor(
+    private readonly sink: Sink<T>,
+    private readonly inner: Stream,
+    private readonly onDispose: (stream: StoreStream<T>) => void,
+  ) {}
+
+  resume(): void {
+    if (this.#terminated || this.#disposed) return;
+    if (this.#completeOnResume) {
+      this.#terminated = true;
+      this.sink.complete();
+      return;
+    }
+    this.#started = true;
+    this.inner.resume();
+  }
+
+  [Symbol.dispose](): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    this.inner[Symbol.dispose]();
+    this.onDispose(this);
+  }
+
+  /** @internal The store was disposed: stop observing, complete the sink. */
+  _storeDisposed(): void {
+    if (this.#disposed) return;
+    this.inner[Symbol.dispose]();
+    if (this.#terminated) return;
+    if (!this.#started) {
+      this.#completeOnResume = true;
+      return;
+    }
+    this.#terminated = true;
+    this.sink.complete();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // StoreImpl — internal state holder
 // ---------------------------------------------------------------------------
 
 class StoreImpl<T> {
-  #signal = createSignal<T>(undefined as T);
-  #sinks = new Set<Sink<T>>();
-  #streams = new Set<Stream>();
+  readonly #signal: WritableSignal<T>;
+  readonly #streams = new Set<StoreStream<T>>();
   #disposed = false;
 
   constructor(initial: T, equals?: (a: T, b: T) => boolean) {
@@ -58,28 +113,13 @@ class StoreImpl<T> {
   // --- Source ---
 
   connect(sink: Sink<T>): Stream {
-    if (this.#disposed) {
-      // Already disposed — complete immediately on resume
-      return {
-        resume() {
-          sink.complete();
-        },
-        [Symbol.dispose]() {},
-      };
-    }
+    // Already disposed — complete on the first resume, nothing before.
+    if (this.#disposed) return completeOnResume(sink);
 
-    this.#sinks.add(sink);
     const inner = fromSignal(this.#signal).connect(sink);
-    const wrapper: Stream = {
-      resume: () => inner.resume(),
-      [Symbol.dispose]: () => {
-        inner[Symbol.dispose]();
-        this.#sinks.delete(sink);
-        this.#streams.delete(wrapper);
-      },
-    };
-    this.#streams.add(wrapper);
-    return wrapper;
+    const stream = new StoreStream<T>(sink, inner, (s) => this.#streams.delete(s));
+    this.#streams.add(stream);
+    return stream;
   }
 
   // --- Store lifecycle ---
@@ -92,17 +132,11 @@ class StoreImpl<T> {
     if (this.#disposed) return;
     this.#disposed = true;
 
-    // Complete all connected sinks
-    for (const sink of this.#sinks) {
-      sink.complete();
-    }
-    this.#sinks.clear();
-
-    // Dispose all inner streams (cleanup state subscriptions)
-    for (const stream of this.#streams) {
-      stream[Symbol.dispose]();
-    }
+    const streams = [...this.#streams];
     this.#streams.clear();
+    for (const stream of streams) {
+      stream._storeDisposed();
+    }
   }
 }
 

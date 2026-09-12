@@ -1,8 +1,13 @@
 // ---------------------------------------------------------------------------
 // testSource — parameterized source for exhaustive testing
 //
-// The oracle controls whether each value delivery causes a pause and
-// whether delivery is immediate or deferred.
+// The oracle controls two things:
+//   - whether the source self-pauses after delivering a value (modelling a
+//     source that has nothing more to say right now and will be resumed
+//     later), and
+//   - when the last value is answered with PAUSE, whether completion is
+//     delivered immediately (terminal events may arrive while paused) or
+//     on the next resume().
 // ---------------------------------------------------------------------------
 
 import type { Source, Sink, Stream } from '../types.js';
@@ -13,6 +18,7 @@ import type { DecisionOracle } from './oracle.js';
 class TestSourceStream<T> implements Stream {
   #index = 0;
   #disposed = false;
+  #completed = false;
 
   constructor(
     private readonly sink: Sink<T>,
@@ -21,23 +27,31 @@ class TestSourceStream<T> implements Stream {
   ) {}
 
   resume(): void {
-    while (this.#index < this.values.length && !this.#disposed) {
+    if (this.#disposed || this.#completed) return;
+    while (this.#index < this.values.length) {
       const value = this.values[this.#index++];
       const result = this.sink.next(value);
+      if (this.#disposed) return;
       if (result === PAUSE) {
+        // Nothing left: the oracle decides whether completion arrives now
+        // (while the sink is paused) or on the next resume().
+        if (this.#index >= this.values.length && this.oracle && this.oracle.integer(2) === 1) {
+          this.#complete();
+        }
         return;
       }
-      // If oracle present, it may decide to pause after delivery
-      if (this.oracle && this.#index < this.values.length) {
-        const shouldPause = this.oracle.integer(2) === 1;
-        if (shouldPause) {
-          return;
-        }
+      // The oracle may decide the source self-pauses here.
+      if (this.oracle && this.#index < this.values.length && this.oracle.integer(2) === 1) {
+        return;
       }
     }
-    if (!this.#disposed && this.#index >= this.values.length) {
-      this.sink.complete();
-    }
+    this.#complete();
+  }
+
+  #complete(): void {
+    if (this.#disposed || this.#completed) return;
+    this.#completed = true;
+    this.sink.complete();
   }
 
   [Symbol.dispose](): void {
@@ -67,8 +81,9 @@ export interface TestSourceOptions {
  * Create a test source that emits the given values.
  *
  * When an `oracle` is provided, it parameterizes whether the source
- * self-pauses between values (enabling exhaustive testing of different
- * delivery patterns).
+ * self-pauses between values and whether completion is delivered while the
+ * sink is paused or on the next `resume()` (enabling exhaustive testing of
+ * different delivery patterns).
  *
  * Without an oracle, behaves identically to `fromArray`.
  */

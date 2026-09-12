@@ -3,15 +3,18 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from 'vitest';
-import { stream } from '../stream.js';
+import { stream, pipe } from '../stream.js';
 import { deferred } from '../sources/deferred.js';
+import { fromArray } from '../sources/from-array.js';
 import { map } from './map.js';
 import { toAsync } from './to-async.js';
 import { StreamDisposedError } from '../stream-disposed-error.js';
 import { createOwner, withOwner } from '../owner.js';
+import { testSink } from '../testing/test-sink.js';
+import { assertProtocol } from '../testing/protocol.js';
 
 describe('toAsync()', () => {
-  it('produces a thunk that resolves with last value', async () => {
+  it('produces a thunk that resolves with the first value', async () => {
     const d = deferred<number>();
     const fn = stream(d, toAsync());
     expect(typeof fn).toBe('function');
@@ -87,5 +90,20 @@ describe('toAsync()', () => {
 
     await owner.dispose();
     await expect(pending).rejects.toBeInstanceOf(StreamDisposedError);
+  });
+
+  it('each call of the thunk opens a fresh connection', async () => {
+    const fn = stream(fromArray([7]), toAsync());
+    expect(await fn()).toBe(7);
+    expect(await fn()).toBe(7);
+  });
+
+  it('bug 12: a second resume() emits only one thunk and one complete()', () => {
+    const sink = testSink<() => Promise<number>>();
+    const s = pipe(fromArray([1]), toAsync(), assertProtocol()).connect(sink);
+    s.resume();
+    s.resume();
+    expect(sink.values).toHaveLength(1);
+    expect(sink.completeCount).toBe(1);
   });
 });

@@ -3,7 +3,8 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from 'vitest';
-import { stream } from '../stream.js';
+import type { Source, Sink } from '../types.js';
+import { stream, pipe } from '../stream.js';
 import { fromArray } from '../sources/from-array.js';
 import { deferred } from '../sources/deferred.js';
 import { createRelay } from '../relay.js';
@@ -11,6 +12,27 @@ import { map } from './map.js';
 import { toCallback } from './to-callback.js';
 import { StreamDisposedError } from '../stream-disposed-error.js';
 import { createOwner, withOwner } from '../owner.js';
+import { testSink } from '../testing/test-sink.js';
+import { assertProtocol } from '../testing/protocol.js';
+
+function tracked<T>(source: Source<T>): Source<T> & { connects: number; disposes: number } {
+  const t = {
+    connects: 0,
+    disposes: 0,
+    connect(sink: Sink<T>) {
+      t.connects++;
+      const s = source.connect(sink);
+      return {
+        resume: () => s.resume(),
+        [Symbol.dispose]: () => {
+          t.disposes++;
+          s[Symbol.dispose]();
+        },
+      };
+    },
+  };
+  return t;
+}
 
 describe('toCallback()', () => {
   it('calls fn for each value and resolves on complete', async () => {
@@ -115,5 +137,64 @@ describe('toCallback()', () => {
 
     expect(owner.size).toBe(0);
     await owner.dispose();
+  });
+
+  it('bug 9: a throwing callback with an async producer rejects, disposes upstream, unregisters', async () => {
+    const owner = createOwner('test-toCallback-throw');
+    const relay = createRelay<number>();
+    const src = tracked(relay);
+    const seen: number[] = [];
+
+    const p = stream(
+      src,
+      toCallback((v: number) => {
+        seen.push(v);
+        if (v === 2) throw new Error('cb boom');
+      }, { owner }),
+    );
+    expect(owner.size).toBe(1);
+
+    relay.next(1);
+    // The exception must not escape into the producer.
+    expect(() => relay.next(2)).not.toThrow();
+    relay.next(3); // upstream disposed — never seen
+    await expect(p).rejects.toThrow('cb boom');
+    expect(seen).toEqual([1, 2]);
+    expect(src.disposes).toBe(1);
+    expect(owner.size).toBe(0);
+  });
+
+  it('bug 9: a throwing callback with a synchronous producer rejects too', async () => {
+    const seen: number[] = [];
+    const p = stream(
+      fromArray([1, 2, 3]),
+      toCallback((v: number) => {
+        seen.push(v);
+        if (v === 2) throw new Error('cb boom');
+      }),
+    );
+    await expect(p).rejects.toThrow('cb boom');
+    expect(seen).toEqual([1, 2]);
+  });
+
+  it('bug 13: an already-disposed owner rejects without connecting upstream', async () => {
+    const owner = createOwner('dead');
+    await owner.dispose();
+    const src = tracked(fromArray([1]));
+    await expect(stream(src, toCallback(() => {}, { owner }))).rejects.toBeInstanceOf(
+      StreamDisposedError,
+    );
+    expect(src.connects).toBe(0);
+  });
+
+  it('bug 12: a second resume() does not open a second upstream connection', () => {
+    const src = tracked(fromArray([1]));
+    const sink = testSink<Promise<void>>();
+    const s = pipe(src, toCallback(() => {}), assertProtocol()).connect(sink);
+    s.resume();
+    s.resume();
+    expect(src.connects).toBe(1);
+    expect(sink.values).toHaveLength(1);
+    expect(sink.completeCount).toBe(1);
   });
 });

@@ -7,14 +7,19 @@
 //
 //   writer.desiredSize ≤ 0 → PAUSE
 //   writer.ready resolves  → resume()
-//   source complete        → writer.close()
+//   source complete        → writer.close()   (queued writes still land)
 //   source error           → writer.abort(err)
 //   writer error           → source [Symbol.dispose]
+//
+// A terminal event may arrive while the source is paused (waiting on
+// writer.ready); the ready callback then finds the pipe finished and does
+// not resume.
 // ---------------------------------------------------------------------------
 
-import type { Source, Sink, Stream as StreamConnection, Operator, PAUSE } from './types.js';
-import { PAUSE as PAUSE_SYM } from './types.js';
+import type { Source, Sink, Stream as StreamConnection, Operator } from './types.js';
+import { PAUSE } from './types.js';
 import { AbstractSource } from './abstract-source.js';
+import { SingleValueStream } from './internal/single-value-stream.js';
 
 /** Connect a source to a WritableStream writer, returning a promise. */
 function sourceIntoWritableStream<T>(
@@ -22,52 +27,46 @@ function sourceIntoWritableStream<T>(
   writable: WritableStream<T>,
 ): Promise<void> {
   const writer = writable.getWriter();
-  let conn: StreamConnection;
+  let conn: StreamConnection | undefined;
   let paused = false;
-  let completed = false;
-  let errored = false;
+  let done = false; // source ended, or the writer failed
 
-  function finish() {
-    completed = true;
-    writer.close().catch(() => {});
-  }
-
-  function fail(err: unknown) {
-    if (errored) return;
-    errored = true;
-    writer.abort(err).catch(() => {});
-  }
+  const abandon = () => {
+    if (done) return;
+    done = true;
+    conn?.[Symbol.dispose]();
+  };
 
   const sink: Sink<T> = {
     next(value: T): undefined | PAUSE {
-      if (completed || errored) return PAUSE_SYM;
+      if (done) return PAUSE;
 
-      writer.write(value).catch(() => {
-        conn[Symbol.dispose]();
-      });
+      writer.write(value).catch(abandon);
 
       if (writer.desiredSize !== null && writer.desiredSize <= 0) {
         paused = true;
         writer.ready.then(
           () => {
-            if (paused && !completed && !errored) {
+            if (paused && !done) {
               paused = false;
-              conn.resume();
+              conn?.resume();
             }
           },
-          () => {
-            conn[Symbol.dispose]();
-          },
+          abandon,
         );
-        return PAUSE_SYM;
+        return PAUSE;
       }
       return undefined;
     },
     complete() {
-      finish();
+      if (done) return;
+      done = true;
+      writer.close().catch(() => {});
     },
     error(err: unknown) {
-      fail(err);
+      if (done) return;
+      done = true;
+      writer.abort(err).catch(() => {});
     },
   };
 
@@ -77,7 +76,7 @@ function sourceIntoWritableStream<T>(
   return writer.closed.then(
     () => {},
     (err) => {
-      conn[Symbol.dispose]();
+      abandon();
       throw err;
     },
   );
@@ -92,16 +91,7 @@ class IntoWritableStreamSource<T> extends AbstractSource<Promise<void>> {
   }
 
   connect(sink: Sink<Promise<void>>): StreamConnection {
-    const source = this.source;
-    const writable = this.writable;
-    return {
-      resume() {
-        const promise = sourceIntoWritableStream(source, writable);
-        sink.next(promise);
-        sink.complete();
-      },
-      [Symbol.dispose]() {},
-    };
+    return new SingleValueStream(sink, () => sourceIntoWritableStream(this.source, this.writable));
   }
 }
 
@@ -110,9 +100,12 @@ class IntoWritableStreamSource<T> extends AbstractSource<Promise<void>> {
  *
  * Returns an `Operator<T, Promise<void>>`. Use as the final step in
  * `stream()` — extracts a `Promise<void>` that resolves when the
- * writer closes.
+ * writer closes, or rejects if the source errors (the writer is aborted
+ * with the error) or the writable fails.
  *
- * Backpressure flows end-to-end via the writer's `ready` promise.
+ * Backpressure flows end-to-end via the writer's `ready` promise. The
+ * upstream is connected on the first `resume()`; later `resume()` calls
+ * are no-ops.
  *
  * @example
  * ```ts

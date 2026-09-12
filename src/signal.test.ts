@@ -5,7 +5,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Sink, Source } from './types.js';
 import { PAUSE } from './types.js';
-import { createSignal, toSignal, computed } from './signal.js';
+import { createSignal, toSignal, computed, microtaskScheduler } from './signal.js';
+import { fromArray } from './sources/from-array.js';
 import type { Scheduler } from './types.js';
 import { pipe } from './stream.js';
 import { scan } from './operators/scan.js';
@@ -647,5 +648,190 @@ describe('cross-scheduler flush', () => {
     flushB!();
     expect(aValues).toEqual([0, 3, 6]);
     expect(bValues).toEqual([0, 3, 6]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Liveness: a plain read registers nothing
+// ---------------------------------------------------------------------------
+
+describe('unobserved computed reads', () => {
+  it('a plain read of a computed does not make its dependencies observed', () => {
+    const a = createSignal(1);
+    let activations = 0;
+    a.observe('activate', () => activations++);
+    const c = computed(() => a() * 2);
+
+    expect(c()).toBe(2);
+    expect(a.observed).toBe(false);
+    expect(activations).toBe(0);
+
+    // Still correct on the pull path
+    a.set(5);
+    expect(c()).toBe(10);
+  });
+
+  it('a plain read of a computed does not connect a toSignal upstream', () => {
+    let connects = 0;
+    let disposes = 0;
+    const src = {
+      connect(sink: { next(v: number): unknown }) {
+        connects++;
+        return { resume() { sink.next(5); }, [Symbol.dispose]() { disposes++; } };
+      },
+    };
+    const s = toSignal<number>({ initial: 0 })(src);
+    const c = computed(() => s() + 1);
+    expect(c()).toBe(1);
+    expect(connects).toBe(0);
+
+    const stop = c.observe('value', () => {});
+    expect(connects).toBe(1);
+    expect(c()).toBe(6);
+    stop();
+    expect(disposes).toBe(1);
+  });
+
+  it('observing a computed chain activates every level and deactivates on stop', () => {
+    const a = createSignal(1);
+    const b = computed(() => a() + 1);
+    const c = computed(() => b() + 1);
+    const seen: number[] = [];
+    expect(c()).toBe(3);
+    expect(a.observed).toBe(false);
+    expect(b.observed).toBe(false);
+
+    const stop = c.observe('value', (v) => seen.push(v));
+    expect(a.observed).toBe(true);
+    expect(b.observed).toBe(true);
+    a.set(10);
+    expect(seen).toEqual([3, 12]);
+
+    stop();
+    expect(a.observed).toBe(false);
+    expect(b.observed).toBe(false);
+    a.set(20);
+    expect(seen).toEqual([3, 12]);
+    expect(c()).toBe(22);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Flush robustness
+// ---------------------------------------------------------------------------
+
+describe('errors during delivery', () => {
+  it('a throwing observer does not starve its siblings', () => {
+    const a = createSignal(0);
+    const seen: number[] = [];
+    a.observe('value', (v) => { if (v === 1) throw new Error('boom'); });
+    a.observe('value', (v) => seen.push(v));
+
+    expect(() => a.set(1)).toThrow('boom');
+    expect(seen).toEqual([0, 1]);
+  });
+
+  it('several throwing observers are reported together', () => {
+    const a = createSignal(0);
+    a.observe('value', (v) => { if (v) throw new Error('one'); });
+    a.observe('value', (v) => { if (v) throw new Error('two'); });
+    let caught: unknown;
+    try { a.set(1); } catch (e) { caught = e; }
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).errors.map((e) => (e as Error).message)).toEqual(['one', 'two']);
+  });
+
+  it('a throwing computed does not block delivery to other subscribers, and is re-evaluated on read', () => {
+    const a = createSignal(0);
+    const bad = computed(() => { if (a() === 1) throw new Error('compute boom'); return a(); });
+    const good = computed(() => a() * 10);
+    const seenGood: number[] = [];
+    bad.observe('value', () => {});
+    good.observe('value', (v) => seenGood.push(v));
+
+    expect(() => a.set(1)).toThrow('compute boom');
+    expect(seenGood).toEqual([0, 10]);
+    expect(() => bad()).toThrow('compute boom');
+
+    a.set(2);
+    expect(bad()).toBe(2);
+    expect(seenGood).toEqual([0, 10, 20]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Re-entrancy during activation
+// ---------------------------------------------------------------------------
+
+describe('set() inside activate callbacks', () => {
+  it('a set() during activation is reflected in the computed that triggered it', () => {
+    const a = createSignal(1);
+    const b = createSignal(10);
+    a.observe('activate', () => b.set(20));
+    const c = computed(() => a() + b());
+    const seen: number[] = [];
+    c.observe('value', (v) => seen.push(v));
+    expect(c()).toBe(21);
+    expect(seen[seen.length - 1]).toBe(21);
+  });
+
+  it('an observed computed over a toSignal that emits synchronously on connect sees the final value', () => {
+    const s = toSignal<number>({ initial: 0 })(fromArray([1, 2, 3]));
+    const c = computed(() => s() * 2);
+    const seen: number[] = [];
+    const stop = c.observe('value', (v) => seen.push(v));
+    expect(c()).toBe(6);
+    expect(seen[seen.length - 1]).toBe(6);
+    stop();
+    expect(s.observed).toBe(false);
+  });
+
+  it('does not leak scheduler refs when activation re-enters evaluation', () => {
+    const a = createSignal(1);
+    const b = createSignal(1);
+    a.observe('activate', () => b.set(2));
+    const c = computed(() => a() + b());
+    const stop = c.observe('value', () => {});
+    stop();
+    // With everything unsubscribed, a write must not reach any observer
+    let delivered = 0;
+    const stop2 = c.observe('value', () => delivered++);
+    stop2();
+    a.set(5);
+    b.set(5);
+    expect(delivered).toBe(1);
+    expect(a.observed).toBe(false);
+    expect(b.observed).toBe(false);
+  });
+});
+
+describe('throwing computed on the read path', () => {
+  it('throws again on the next read instead of handing out an unset value', () => {
+    let fail = true;
+    const c = computed(() => { if (fail) throw new Error('nope'); return 1; });
+    expect(() => c()).toThrow('nope');
+    expect(() => c()).toThrow('nope');
+    fail = false;
+    expect(c()).toBe(1);
+  });
+});
+
+describe('scheduled delivery', () => {
+  it('a coalescing scheduler never delivers a value equal to the last delivered one', async () => {
+    const b = createSignal(0);
+    const seen: number[] = [];
+    b.observe('value', (v) => seen.push(v), microtaskScheduler);
+    b.set(1);
+    b.set(0);
+    await Promise.resolve();
+    expect(seen).toEqual([0]);
+  });
+
+  it('microtaskScheduler runs every callback scheduled in a tick', async () => {
+    const order: string[] = [];
+    microtaskScheduler.schedule(() => order.push('a'));
+    microtaskScheduler.schedule(() => order.push('b'));
+    await Promise.resolve();
+    expect(order).toEqual(['a', 'b']);
   });
 });

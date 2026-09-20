@@ -17,8 +17,8 @@ function drive(s: { resume(): void }, sink: { completeCount: number }, max = 80)
   for (let i = 0; i < max && !sink.completeCount; i++) s.resume();
 }
 
-function check(chunks: (string | Uint8Array)[], expected: string[]) {
-  exhaustiveTest((oracle) => {
+async function check(chunks: (string | Uint8Array)[], expected: string[]) {
+  await exhaustiveTest((oracle) => {
     const src = testSource(chunks, { oracle });
     const sink = testSink<string>({ oracle });
     const s = pipe(src, lines(), assertProtocol()).connect(sink);

@@ -92,8 +92,8 @@ describe('fromSignal', () => {
     s[Symbol.dispose]();
   });
 
-  it('a change back to the delivered value while paused is still a (conflated) change', () => {
-    // Only "changed while paused" is tracked, not "differs from last delivered".
+  it('a change back to the delivered value while paused delivers nothing on resume', () => {
+    // Conflation lands on the value the sink already holds: it is owed nothing.
     const sig = createSignal(0);
     const sink = pausingSink<number>();
     const s = fromSignal(sig).connect(sink);
@@ -101,7 +101,10 @@ describe('fromSignal', () => {
     sig.set(1);
     sig.set(0);
     s.resume();
-    expect(sink.values).toEqual([0, 0]);
+    expect(sink.values).toEqual([0]);
+    sig.set(2);
+    s.resume();
+    expect(sink.values).toEqual([0, 2]);
     s[Symbol.dispose]();
   });
 
@@ -163,5 +166,22 @@ describe('fromSignal', () => {
     sig.set(6); // delivered directly
     expect(values).toEqual([0, 5, 6]);
     s[Symbol.dispose]();
+  });
+});
+
+describe('fromSignal conflation', () => {
+  it('does not redeliver the value the sink already holds after A → B → A while paused', () => {
+    const a = { n: 1 }; const b = { n: 2 };
+    const sig = createSignal(a);
+    const got: unknown[] = [];
+    const s = fromSignal(sig).connect({ next(v) { got.push(v); return PAUSE; }, complete() {}, error() {} });
+    s.resume();
+    sig.set(b);
+    sig.set(a);
+    s.resume();
+    expect(got).toEqual([a]);
+    sig.set(b);
+    s.resume();
+    expect(got).toEqual([a, b]);
   });
 });

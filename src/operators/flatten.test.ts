@@ -19,8 +19,8 @@ function drive(s: { resume(): void }, sink: { completeCount: number }, max = 40)
 }
 
 describe('flatten (exhaustive)', () => {
-  it('two inner arrays — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('two inner arrays — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([fromArray([1, 2]), fromArray([3, 4])], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, flatten(), assertProtocol()).connect(sink);
@@ -30,8 +30,8 @@ describe('flatten (exhaustive)', () => {
     });
   });
 
-  it('two self-pausing inners — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('two self-pausing inners — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource(
         [testSource([1, 2], { oracle }), testSource([3, 4], { oracle })],
         { oracle },
@@ -44,8 +44,8 @@ describe('flatten (exhaustive)', () => {
     });
   });
 
-  it('three inner arrays', () => {
-    exhaustiveTest((oracle) => {
+  it('three inner arrays', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([fromArray([1]), fromArray([2, 3]), fromArray([4])], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, flatten(), assertProtocol()).connect(sink);
@@ -55,8 +55,8 @@ describe('flatten (exhaustive)', () => {
     });
   });
 
-  it('empty inner first', () => {
-    exhaustiveTest((oracle) => {
+  it('empty inner first', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([empty<number>(), fromArray([1, 2])], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, flatten(), assertProtocol()).connect(sink);
@@ -66,8 +66,8 @@ describe('flatten (exhaustive)', () => {
     });
   });
 
-  it('empty inner last', () => {
-    exhaustiveTest((oracle) => {
+  it('empty inner last', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([fromArray([1, 2]), empty<number>()], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, flatten(), assertProtocol()).connect(sink);
@@ -77,8 +77,8 @@ describe('flatten (exhaustive)', () => {
     });
   });
 
-  it('all empty inners', () => {
-    exhaustiveTest((oracle) => {
+  it('all empty inners', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([empty<number>(), empty<number>(), empty<number>()], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, flatten(), assertProtocol()).connect(sink);
@@ -88,8 +88,8 @@ describe('flatten (exhaustive)', () => {
     });
   });
 
-  it('single inner with many values', () => {
-    exhaustiveTest((oracle) => {
+  it('single inner with many values', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([fromArray([1, 2, 3, 4, 5])], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, flatten(), assertProtocol()).connect(sink);
@@ -99,8 +99,8 @@ describe('flatten (exhaustive)', () => {
     });
   });
 
-  it('empty outer', () => {
-    exhaustiveTest((oracle) => {
+  it('empty outer', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource<Source<number>>([], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, flatten(), assertProtocol()).connect(sink);

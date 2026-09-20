@@ -37,6 +37,20 @@ export interface TestSinkOptions {
   oracle?: DecisionOracle;
 }
 
+/** A short rendering of a primitive value for labels; nothing for objects. */
+function describe(value: unknown): string {
+  switch (typeof value) {
+    case 'string':
+      return ` (${JSON.stringify(value.length > 20 ? value.slice(0, 17) + '...' : value)})`;
+    case 'number':
+    case 'boolean':
+    case 'bigint':
+      return ` (${String(value)})`;
+    default:
+      return '';
+  }
+}
+
 class TestSinkImpl<T> implements TestSink<T> {
   readonly values: T[] = [];
   readonly errors: unknown[] = [];
@@ -49,7 +63,8 @@ class TestSinkImpl<T> implements TestSink<T> {
   next(value: T): undefined | typeof PAUSE_SYM {
     if (this.terminated) throw new ProtocolViolationError('next() after a terminal event');
     this.values.push(value);
-    if (this.oracle && this.oracle.integer(2) === 1) {
+    const n = this.values.length;
+    if (this.oracle && this.oracle.integer(2, `sink pauses after value #${n}${describe(value)}`) === 1) {
       this.paused = true;
       return PAUSE_SYM;
     }

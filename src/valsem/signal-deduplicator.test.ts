@@ -3,9 +3,9 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, vi } from 'vitest';
-import { createSignal, computed } from './signal.js';
-import { SignalDeduplicator } from './signal-collection.js';
-import { fromSignal } from './sources/from-signal.js';
+import { createSignal, computed } from '../signal.js';
+import { SignalDeduplicator } from './signal-deduplicator.js';
+import { fromSignal } from '../sources/from-signal.js';
 
 // Helper: factory that creates writable signals (tracks calls)
 function trackingFactory() {

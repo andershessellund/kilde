@@ -24,8 +24,11 @@ data as a value (`AsyncValue`) rather than as a pile of booleans, and a
 small **ownership** protocol says who tears a hot resource down — your own
 scope, a framework's, or nobody's.
 
-kilde has one dependency, [valsem](https://github.com/andershessellund/valsem),
-which provides the structural equality signals use to skip no-op updates.
+kilde has no dependencies. Two optional entry points have an optional peer
+each: `kilde/valsem` needs [valsem](https://github.com/andershessellund/valsem)
+for value semantics, and `kilde/testing` needs
+[stifinder](https://github.com/andershessellund/stifinder) for state-space
+exploration. Install them only if you import those.
 
 ## Signals
 
@@ -43,18 +46,18 @@ full(); // 'Augusta Lovelace'
 ```
 
 A signal is a function: call it to read. Reading inside `computed` registers a
-dependency, so the graph builds itself. `set` and `update` write; a write whose
-value is equal to the current one (structurally, via valsem's `deepEqual`)
-is dropped and nothing downstream runs.
+dependency, so the graph builds itself. `set` and `update` write; a write of
+the same value (`Object.is`) is dropped and nothing downstream runs.
 
-Structural equality is a deliberate default, and it has a cost and two
-caveats. Every write compares the old and new value, which is linear in the
-size of the value; a signal holding a large array pays for that on every
-`set`. `deepEqual` compares `Date`, `Map`, `Set` and class instances by
-reference, so those always count as changed. And a cyclic object overflows
-the stack. Pass `{ equals: Object.is }` (or any predicate) to `createSignal`,
-`computed`, `toSignal` and `createStore` when reference equality is what you
-want.
+`Object.is` is the default because it is O(1), predictable, and what every
+other signal system uses. When you want structural equality, either pass
+`{ equals }` with any predicate to `createSignal`, `computed`, `toSignal`,
+`createStore` and `linkedSignal`, or produce canonical values, for which
+`Object.is` already *is* structural equality. That is what the
+`kilde/valsem` entry point is for (see below). One consequence to know:
+a `toSignal` over a stream that rebuilds its value, a `scan` that spreads
+or a `combineLatest` tuple, sees a new identity on every emission, so pass
+`equals` there if the rebuilt value is often unchanged.
 
 Observe changes with `observe`. The callback receives the current value at
 once, then every change:
@@ -100,9 +103,6 @@ A few more forms are worth knowing:
 - `track(fn)` is the building block under `computed`: a tracking node with
   an explicit dependent protocol, for code that integrates its own
   scheduler or reconciler.
-- `SignalDeduplicator` is a keyed cache of signals with structural keys.
-  Entries evict themselves on `'deactivate'`, so use it from computeds that
-  are observed.
 - `observe('read', fn)` installs a hook that runs on every read of a signal.
   It is what `link` uses to pull a derivation through; you rarely need it.
 
@@ -213,7 +213,11 @@ a channel and `fromChannel(ch)` reads one out.
 
 An `AsyncValue<T>` is one of `unavailable`, `loading`, `available(value)`, or
 `errored(error)`. The non-available states can carry a `staleValue`, so a UI
-can keep showing the last good result while a refresh is in flight.
+can keep showing the last good result while a refresh is in flight. Every
+async signal compares envelopes with `asyncValueEquals`: same status, same
+payload (`Object.is`, or the `equals` option where a signal owns a payload),
+same error; `loading()` after `loading()` notifies nobody, and
+`combineAsync` compares its tuple element by element.
 
 ```ts
 import {
@@ -256,6 +260,31 @@ const db = deriveResource(config, async (cfg) => {
   return { value: pool, [Symbol.dispose]: () => pool.close() };
 });
 ```
+
+## Value semantics with valsem
+
+```ts
+import { produced } from 'kilde/valsem';
+import { draft } from 'valsem';
+
+const open = produced(() => todos().filter((t) => !t.done));
+
+const totalled = produced(() => {
+  const order = draft(currentOrder());
+  order.total = order.lines.reduce((sum, l) => sum + l.price, 0);
+  return order;
+});
+```
+
+`produced` is a `computed` whose result is a canonical
+[valsem](https://github.com/andershessellund/valsem) value: structurally
+equal results are the same instance, so the `Object.is` default already
+deduplicates them and everything downstream. Reads inside the recipe are
+plain frozen values at native speed; call `draft()` only on the inputs you
+want to edit with mutable syntax, and untouched parts keep their identity.
+`SignalDeduplicator`, a keyed cache of signals with structural keys that
+evicts entries on `'deactivate'`, lives here too. `kilde/valsem` needs
+valsem installed; the core does not.
 
 ## Stores
 
@@ -316,9 +345,9 @@ backpressure mapped both ways.
 ```ts
 import { testSource, testSink, exhaustiveTest } from 'kilde/testing';
 
-exhaustiveTest((oracle) => {
+await exhaustiveTest((oracle) => {
   const sink = testSink<number>({ oracle });
-  const s = pipe(testSource([1, 2, 3], { oracle }), myOperator()).connect(sink);
+  const s = pipe(testSource([1, 2, 3], { oracle }), myOperator(), assertProtocol()).connect(sink);
   s.resume();
   while (sink.completeCount === 0) s.resume();
   expect(sink.values).toEqual([1, 2, 3]);
@@ -327,15 +356,19 @@ exhaustiveTest((oracle) => {
 
 `testSource` and `testSink` consult a decision oracle at every point where
 they could pause, resume, or deliver, including whether completion arrives
-while the sink is paused; `exhaustiveTest` runs the body once per
-interleaving. `assertProtocol()` is an operator that throws on any breach of
-the stream protocol. Put it after the operator under test and every
+while the sink is paused; `exhaustiveTest` explores every decision sequence
+with [stifinder](https://github.com/andershessellund/stifinder), fewest
+departures from the plain schedule first, and reports the smallest failing
+one with each departure named: "sink pauses after value #2", "source
+completes while the sink is paused". `assertProtocol()` is an operator that throws on any breach of the
+stream protocol. Put it after the operator under test and every
 interleaving becomes a conformance check. If an operator has an ordering
 bug, this finds it.
 
 ## Guarantees and requirements
 
-- Signals never deliver a value equal to the previous one.
+- Signals never deliver the same value (`Object.is`, or your `equals`) twice
+  in a row, and the async layer never delivers a redundant envelope.
 - Cold sources do no work until connected, and release everything when the
   last connection is disposed.
 - `PAUSE` is honoured by every built-in source and operator. A relay buffers

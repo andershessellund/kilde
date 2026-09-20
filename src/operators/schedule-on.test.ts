@@ -326,8 +326,8 @@ describe('scheduleOn (bug 5 — downstream pause mid-flush)', () => {
 });
 
 describe('scheduleOn (exhaustive)', () => {
-  it('immediate scheduler — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('immediate scheduler — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, scheduleOn(immediateScheduler), assertProtocol()).connect(sink);
@@ -337,8 +337,8 @@ describe('scheduleOn (exhaustive)', () => {
     });
   });
 
-  it('manual scheduler — all pause orderings, ticks between resumes', () => {
-    exhaustiveTest((oracle) => {
+  it('manual scheduler — all pause orderings, ticks between resumes', async () => {
+    await exhaustiveTest((oracle) => {
       const scheduler = createManualScheduler();
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number>({ oracle });

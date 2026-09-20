@@ -18,8 +18,8 @@ function drive(s: { resume(): void }, sink: { completeCount: number }, max = 40)
 }
 
 describe('relay (exhaustive)', () => {
-  it('relay through map — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('relay through map — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const relay = createRelay<number>();
       const mapped = pipe(
         relay,
@@ -41,8 +41,8 @@ describe('relay (exhaustive)', () => {
     });
   });
 
-  it('relay through filter — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('relay through filter — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const relay = createRelay<number>();
       const filtered = pipe(
         relay,
@@ -65,8 +65,8 @@ describe('relay (exhaustive)', () => {
     });
   });
 
-  it('relay through take — early termination', () => {
-    exhaustiveTest((oracle) => {
+  it('relay through take — early termination', async () => {
+    await exhaustiveTest((oracle) => {
       const relay = createRelay<number>();
       const taken = pipe(relay, take(2), assertProtocol());
       const sink = testSink<number>({ oracle });
@@ -83,8 +83,8 @@ describe('relay (exhaustive)', () => {
     });
   });
 
-  it('two subscribers — all pause orderings per subscriber', () => {
-    exhaustiveTest((oracle) => {
+  it('two subscribers — all pause orderings per subscriber', async () => {
+    await exhaustiveTest((oracle) => {
       const relay = createRelay<number>();
       const sink1 = testSink<number>({ oracle });
       const sink2 = testSink<number>({ oracle });
@@ -106,8 +106,8 @@ describe('relay (exhaustive)', () => {
     });
   });
 
-  it('relay error — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('relay error — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const relay = createRelay<number>();
       const sink = testSink<number>({ oracle });
       const s = pipe(relay, assertProtocol()).connect(sink);
@@ -123,8 +123,8 @@ describe('relay (exhaustive)', () => {
     });
   });
 
-  it('values pushed before the first resume are delivered on resume — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('values pushed before the first resume are delivered on resume — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const relay = createRelay<number>();
       const sink = testSink<number>({ oracle });
       const s = pipe(relay, assertProtocol()).connect(sink);

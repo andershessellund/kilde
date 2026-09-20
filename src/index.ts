@@ -94,10 +94,6 @@ export { immediateScheduler, microtaskScheduler, animationFrameScheduler } from 
 export { link, linkedSignal } from './linked-signal.js';
 export type { LinkOptions } from './linked-signal.js';
 
-// --- Signal Deduplicator ---
-export { SignalDeduplicator } from './signal-collection.js';
-export type { SignalDeduplicatorOptions } from './signal-collection.js';
-
 // --- AsyncValue / AsyncState ---
 export {
   unavailable,
@@ -111,6 +107,8 @@ export {
   valueOr,
   mapValue,
   combineValues,
+  asyncValueEquals,
+  tupleEquals,
 } from './async-value.js';
 export type {
   Unavailable,
@@ -118,6 +116,7 @@ export type {
   Available,
   Errored,
   AsyncValue,
+  Equals,
 } from './async-value.js';
 export {
   computedAsync,

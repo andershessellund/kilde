@@ -41,7 +41,6 @@
 
 import type { Source, Sink, Stream, WritableSignal, Signal, Scheduler } from './types.js';
 import { PAUSE } from './types.js';
-import { deepEqual } from 'valsem';
 
 // ---------------------------------------------------------------------------
 // Sentinel — distinguishes "never evaluated" from any user value
@@ -851,7 +850,7 @@ class TrackerNode<T> {
 // ---------------------------------------------------------------------------
 
 export interface CreateSignalOptions<T> {
-  /** Custom equality function. Default: `deepEqual`. */
+  /** Custom equality function. Default: `Object.is`. */
   equals?: (a: T, b: T) => boolean;
 }
 
@@ -859,7 +858,7 @@ export interface ToSignalOptions<T> {
   /** Initial value before upstream emits. */
   initial: T;
 
-  /** Custom equality function. Default: `deepEqual`. */
+  /** Custom equality function. Default: `Object.is`. */
   equals?: (a: T, b: T) => boolean;
 
   /**
@@ -873,7 +872,7 @@ export interface ToSignalOptions<T> {
 }
 
 export interface ComputedOptions<T> {
-  /** Custom equality function. Default: `deepEqual`. */
+  /** Custom equality function. Default: `Object.is`. */
   equals?: (a: T, b: T) => boolean;
 }
 
@@ -882,8 +881,10 @@ export interface ComputedOptions<T> {
  *
  * Signals are callable — invoke `signal()` to read the value.
  * Always holds a value. Replays the latest value to new subscribers
- * on `resume()`. Skips emission when the new value is deeply equal
- * to the current one.
+ * on `resume()`. Skips emission when the new value is the same as the
+ * current one (`Object.is` by default; pass `equals` to compare
+ * structurally, or produce canonical values so that `Object.is` already
+ * is structural equality).
  *
  * Calling `signal()` inside a `computed()` callback automatically registers
  * this signal as a dependency.
@@ -899,7 +900,7 @@ export interface ComputedOptions<T> {
  * ```
  */
 export function createSignal<T>(initial: T, opts?: CreateSignalOptions<T>): WritableSignal<T> {
-  const node = new SignalNode<T>(initial, opts?.equals ?? deepEqual);
+  const node = new SignalNode<T>(initial, opts?.equals ?? Object.is);
   const fn = function (this: void): T {
     return coordinatorRead(node);
   };
@@ -946,7 +947,7 @@ export function createSignal<T>(initial: T, opts?: CreateSignalOptions<T>): Writ
  */
 export function toSignal<T>(opts: ToSignalOptions<T>): (source: Source<T>) => Signal<T> {
   return (source) => {
-    const equals = opts.equals ?? deepEqual;
+    const equals = opts.equals ?? Object.is;
     const keepAlive = opts.keepAlive ?? false;
     const node = new SignalNode<T>(opts.initial, equals);
 
@@ -1021,8 +1022,8 @@ export function toSignal<T>(opts: ToSignalOptions<T>): (source: Source<T>) => Si
  *
  * When a dependency changes, the computed is marked dirty. The value
  * is lazily recomputed on the next read. If the recomputed value is
- * equal to the previous one (deep equality by default), dependents
- * are not notified.
+ * the same as the previous one (`Object.is` by default; pass `equals`
+ * for structural comparison), dependents are not notified.
  *
  * Computed signals are also `Source<T>` — they can be subscribed to
  * via `connect()` like any other signal.
@@ -1040,7 +1041,7 @@ export function toSignal<T>(opts: ToSignalOptions<T>): (source: Source<T>) => Si
  * ```
  */
 export function computed<T>(fn: () => T, opts?: ComputedOptions<T>): Signal<T> {
-  const node = new ComputedNode(fn, opts?.equals ?? deepEqual);
+  const node = new ComputedNode(fn, opts?.equals ?? Object.is);
   const callable = function (this: void): T {
     return coordinatorRead(node);
   };
@@ -1102,7 +1103,7 @@ export type TrackController<T> = TrackerNode<T>;
  * ```
  */
 export function track<T>(fn: () => T, opts?: { equals?: (a: T, b: T) => boolean }): TrackerNode<T> {
-  return new TrackerNode(fn, opts?.equals ?? deepEqual);
+  return new TrackerNode(fn, opts?.equals ?? Object.is);
 }
 
 // ---------------------------------------------------------------------------

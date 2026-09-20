@@ -163,8 +163,8 @@ describe('merge', () => {
   // Exhaustive tests (all pause/resume interleavings)
   // ---------------------------------------------------------------------------
 
-  it('two inner arrays — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('two inner arrays — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([fromArray([1, 2]), fromArray([3, 4])], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, merge(), assertProtocol()).connect(sink);
@@ -174,8 +174,8 @@ describe('merge', () => {
     });
   });
 
-  it('three inner arrays — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('three inner arrays — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource(
         [fromArray([1]), fromArray([2, 3]), fromArray([4])],
         { oracle },
@@ -188,8 +188,8 @@ describe('merge', () => {
     });
   });
 
-  it('two self-pausing inners — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('two self-pausing inners — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource(
         [testSource([1, 2], { oracle }), testSource([3, 4], { oracle })],
         { oracle },
@@ -202,8 +202,8 @@ describe('merge', () => {
     });
   });
 
-  it('empty inner first — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('empty inner first — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([empty<number>(), fromArray([1, 2])], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, merge(), assertProtocol()).connect(sink);
@@ -213,8 +213,8 @@ describe('merge', () => {
     });
   });
 
-  it('empty inner last — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('empty inner last — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([fromArray([1, 2]), empty<number>()], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, merge(), assertProtocol()).connect(sink);
@@ -224,8 +224,8 @@ describe('merge', () => {
     });
   });
 
-  it('all empty inners — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('all empty inners — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource(
         [empty<number>(), empty<number>(), empty<number>()],
         { oracle },
@@ -238,8 +238,8 @@ describe('merge', () => {
     });
   });
 
-  it('single inner with many values — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('single inner with many values — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([fromArray([1, 2, 3, 4, 5])], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, merge(), assertProtocol()).connect(sink);
@@ -249,8 +249,8 @@ describe('merge', () => {
     });
   });
 
-  it('empty outer — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('empty outer — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource<Source<number>>([], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, merge(), assertProtocol()).connect(sink);

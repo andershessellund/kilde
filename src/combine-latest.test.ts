@@ -393,8 +393,8 @@ describe('combineLatest', () => {
   // Exhaustive tests (all pause/resume interleavings)
   // ---------------------------------------------------------------------------
 
-  it('two fromArray sources — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('two fromArray sources — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const a = testSource([1, 2], { oracle });
       const b = testSource([10, 20], { oracle });
       const sink = testSink<[number, number]>({ oracle });
@@ -409,8 +409,8 @@ describe('combineLatest', () => {
     });
   });
 
-  it('three sources — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('three sources — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const a = testSource([1], { oracle });
       const b = testSource([2, 3], { oracle });
       const c = testSource([4], { oracle });
@@ -424,8 +424,8 @@ describe('combineLatest', () => {
     });
   });
 
-  it('one source empty — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('one source empty — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const a = testSource([1, 2], { oracle });
       const b = testSource<number>([], { oracle });
       const sink = testSink<[number, number]>({ oracle });
@@ -438,8 +438,8 @@ describe('combineLatest', () => {
     });
   });
 
-  it('single source — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('single source — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const a = testSource([1, 2, 3], { oracle });
       const sink = testSink<[number]>({ oracle });
       const s = pipe(combineLatest([a]), assertProtocol()).connect(sink);

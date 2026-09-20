@@ -227,11 +227,11 @@ class CombineLatestSource<T extends readonly any[]> extends AbstractSource<T> {
  *
  * @example
  * ```ts
- * import { combineLatest, createSignal, stream, toArray } from 'kilde';
+ * import { combineLatest, createSignal, fromSignal } from 'kilde';
  *
  * const a = createSignal(1);
  * const b = createSignal('x');
- * const combined = combineLatest([a, b]);
+ * const combined = combineLatest([fromSignal(a), fromSignal(b)]);
  * // combined is Source<[number, string]>
  * ```
  */

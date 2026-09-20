@@ -10,7 +10,7 @@
 // ---------------------------------------------------------------------------
 
 import { HashMap } from 'valsem';
-import type { Signal } from './types.js';
+import type { Signal } from '../types.js';
 
 /** Options for {@link SignalDeduplicator}. */
 export interface SignalDeduplicatorOptions<K, V> {

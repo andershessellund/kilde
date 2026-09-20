@@ -218,11 +218,7 @@ describe('computedAsync', () => {
   it('keepStale: false does not retain stale values', async () => {
     const s1 = asyncSignal<number>(available(1));
 
-    const result = computedAsync(
-      [s1],
-      async (n) => n * 10,
-      { keepStale: false },
-    );
+    const result = computedAsync([s1], async (n) => n * 10);
 
     const unsub = sub(result);
     await flush();

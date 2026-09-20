@@ -17,8 +17,8 @@ function drive(s: { resume(): void }, sink: { completeCount: number }, max = 40)
 }
 
 describe('toArray (exhaustive)', () => {
-  it('collects everything — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('collects everything — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number[]>({ oracle });
       const s = pipe(src, toArray(), assertProtocol()).connect(sink);
@@ -28,8 +28,8 @@ describe('toArray (exhaustive)', () => {
     });
   });
 
-  it('empty source — emits []', () => {
-    exhaustiveTest((oracle) => {
+  it('empty source — emits []', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource<number>([], { oracle });
       const sink = testSink<number[]>({ oracle });
       const s = pipe(src, toArray(), assertProtocol()).connect(sink);

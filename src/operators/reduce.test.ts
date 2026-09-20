@@ -16,8 +16,8 @@ function drive(s: { resume(): void }, sink: { completeCount: number }, max = 40)
 }
 
 describe('reduce (exhaustive)', () => {
-  it('sum — all source pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('sum — all source pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3, 4], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(
@@ -31,8 +31,8 @@ describe('reduce (exhaustive)', () => {
     });
   });
 
-  it('product', () => {
-    exhaustiveTest((oracle) => {
+  it('product', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([2, 3, 4], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(
@@ -46,8 +46,8 @@ describe('reduce (exhaustive)', () => {
     });
   });
 
-  it('single value', () => {
-    exhaustiveTest((oracle) => {
+  it('single value', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([7], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(
@@ -61,8 +61,8 @@ describe('reduce (exhaustive)', () => {
     });
   });
 
-  it('empty source — emits initial', () => {
-    exhaustiveTest((oracle) => {
+  it('empty source — emits initial', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource<number>([], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(
@@ -76,8 +76,8 @@ describe('reduce (exhaustive)', () => {
     });
   });
 
-  it('string concatenation', () => {
-    exhaustiveTest((oracle) => {
+  it('string concatenation', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource(['a', 'b', 'c'], { oracle });
       const sink = testSink<string>({ oracle });
       const s = pipe(
@@ -91,8 +91,8 @@ describe('reduce (exhaustive)', () => {
     });
   });
 
-  it('error in fn — reports error, no result', () => {
-    exhaustiveTest((oracle) => {
+  it('error in fn — reports error, no result', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(

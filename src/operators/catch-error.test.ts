@@ -63,8 +63,8 @@ function drive(s: { resume(): void }, sink: { completeCount: number }, max = 40)
 }
 
 describe('catchError (exhaustive)', () => {
-  it('error after one value — recover with array', () => {
-    exhaustiveTest((oracle) => {
+  it('error after one value — recover with array', async () => {
+    await exhaustiveTest((oracle) => {
       const sink = testSink<number>({ oracle });
       const s = pipe(
         failAfter([1], undefined, oracle),
@@ -77,8 +77,8 @@ describe('catchError (exhaustive)', () => {
     });
   });
 
-  it('error after two values — longer fallback', () => {
-    exhaustiveTest((oracle) => {
+  it('error after two values — longer fallback', async () => {
+    await exhaustiveTest((oracle) => {
       const sink = testSink<number>({ oracle });
       const s = pipe(
         failAfter([1, 2], undefined, oracle),
@@ -91,8 +91,8 @@ describe('catchError (exhaustive)', () => {
     });
   });
 
-  it('immediate error — full fallback', () => {
-    exhaustiveTest((oracle) => {
+  it('immediate error — full fallback', async () => {
+    await exhaustiveTest((oracle) => {
       const sink = testSink<number>({ oracle });
       const s = pipe(
         failAfter<number>([], undefined, oracle),
@@ -105,8 +105,8 @@ describe('catchError (exhaustive)', () => {
     });
   });
 
-  it('no error — passthrough', () => {
-    exhaustiveTest((oracle) => {
+  it('no error — passthrough', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(
@@ -120,8 +120,8 @@ describe('catchError (exhaustive)', () => {
     });
   });
 
-  it('fallback that errors too — error forwarded once', () => {
-    exhaustiveTest((oracle) => {
+  it('fallback that errors too — error forwarded once', async () => {
+    await exhaustiveTest((oracle) => {
       const sink = testSink<number>({ oracle });
       const s = pipe(
         failAfter([1], new Error('first'), oracle),
@@ -135,9 +135,9 @@ describe('catchError (exhaustive)', () => {
     });
   });
 
-  it('error handler receives original error', () => {
+  it('error handler receives original error', async () => {
     const captured: unknown[] = [];
-    exhaustiveTest((oracle) => {
+    await exhaustiveTest((oracle) => {
       captured.length = 0;
       const sink = testSink<number>({ oracle });
       const s = pipe(

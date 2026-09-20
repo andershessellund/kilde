@@ -145,7 +145,7 @@ class StoreImpl<T> {
 // ---------------------------------------------------------------------------
 
 export interface CreateStoreOptions<T> {
-  /** Custom equality function. Default: `deepEqual`. */
+  /** Custom equality function. Default: `Object.is`. */
   equals?: (a: T, b: T) => boolean;
 }
 
@@ -154,7 +154,7 @@ export interface CreateStoreOptions<T> {
  *
  * A store is a callable signal — invoke `store()` to read the value.
  * Always holds a value, replays to new subscribers, and deduplicates
- * via deep equality (configurable). Disposing the store completes all
+ * via `Object.is` (configurable). Disposing the store completes all
  * connected sinks.
  *
  * @example

@@ -17,8 +17,8 @@ function drive(s: { resume(): void }, sink: { completeCount: number }, max = 40)
 }
 
 describe('take (exhaustive)', () => {
-  it('take 3 from 5 — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('take 3 from 5 — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3, 4, 5], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, take(3), assertProtocol()).connect(sink);
@@ -28,8 +28,8 @@ describe('take (exhaustive)', () => {
     });
   });
 
-  it('take 1 — early termination', () => {
-    exhaustiveTest((oracle) => {
+  it('take 1 — early termination', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([10, 20, 30], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, take(1), assertProtocol()).connect(sink);
@@ -39,8 +39,8 @@ describe('take (exhaustive)', () => {
     });
   });
 
-  it('take 0 — immediate complete', () => {
-    exhaustiveTest((oracle) => {
+  it('take 0 — immediate complete', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, take(0), assertProtocol()).connect(sink);
@@ -50,8 +50,8 @@ describe('take (exhaustive)', () => {
     });
   });
 
-  it('take more than available', () => {
-    exhaustiveTest((oracle) => {
+  it('take more than available', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, take(10), assertProtocol()).connect(sink);
@@ -61,8 +61,8 @@ describe('take (exhaustive)', () => {
     });
   });
 
-  it('take all — same as passthrough', () => {
-    exhaustiveTest((oracle) => {
+  it('take all — same as passthrough', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, take(3), assertProtocol()).connect(sink);

@@ -17,8 +17,8 @@ function drive(s: { resume(): void }, sink: { completeCount: number }, max = 40)
 }
 
 describe('map (exhaustive)', () => {
-  it('double — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('double — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(
@@ -32,8 +32,8 @@ describe('map (exhaustive)', () => {
     });
   });
 
-  it('identity — preserves values', () => {
-    exhaustiveTest((oracle) => {
+  it('identity — preserves values', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([10, 20, 30, 40], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(
@@ -47,8 +47,8 @@ describe('map (exhaustive)', () => {
     });
   });
 
-  it('type change — number to string', () => {
-    exhaustiveTest((oracle) => {
+  it('type change — number to string', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<string>({ oracle });
       const s = pipe(
@@ -62,8 +62,8 @@ describe('map (exhaustive)', () => {
     });
   });
 
-  it('empty source', () => {
-    exhaustiveTest((oracle) => {
+  it('empty source', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource<number>([], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(
@@ -77,8 +77,8 @@ describe('map (exhaustive)', () => {
     });
   });
 
-  it('error in fn — reports error on all orderings, nothing afterwards', () => {
-    exhaustiveTest((oracle) => {
+  it('error in fn — reports error on all orderings, nothing afterwards', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(

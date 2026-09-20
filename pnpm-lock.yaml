@@ -7,10 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      valsem:
-        specifier: ^0.0.2
-        version: 0.0.2
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
@@ -18,12 +14,18 @@ importers:
       eslint:
         specifier: ^9.0.0
         version: 9.39.5
+      stifinder:
+        specifier: ^0.0.1
+        version: 0.0.1(valsem@0.0.4)
       typescript:
         specifier: ^5.6.0
         version: 5.9.3
       typescript-eslint:
         specifier: ^8.0.0
         version: 8.70.0(eslint@9.39.5)(typescript@5.9.3)
+      valsem:
+        specifier: ^0.0.4
+        version: 0.0.4
       vitest:
         specifier: ^3.0.0
         version: 3.2.7(@types/node@22.20.2)
@@ -865,6 +867,12 @@ packages:
   std-env@3.10.0:
     resolution: {integrity: sha512-5GS12FdOZNliM5mAOxFRg7Ir0pWz8MdpYm6AY6VPkGpbA7ZzmbzNcBJQ0GPvvyWgcY7QAhCgf9Uy89I03faLkg==}
 
+  stifinder@0.0.1:
+    resolution: {integrity: sha512-Y59qjV+9PcooaczGXV2YJkKY33Bxb1DVt4lmnY8GRWOsDJeL9RxE/WvvnryxD5W3VxCe6p6WIjZma8ebqk5hdw==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      valsem: '>=0.0.3 <1'
+
   strip-json-comments@3.1.1:
     resolution: {integrity: sha512-6fPc+R4ihwqP6N/aIv2f1gMH8lOVtWQHoqC4yK6oSDVVocumAsfCqjkXnqiYMhmMwS/mEHLp7Vehlt3ql6lEig==}
     engines: {node: '>=8'}
@@ -926,8 +934,8 @@ packages:
   uri-js@4.4.1:
     resolution: {integrity: sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg==}
 
-  valsem@0.0.2:
-    resolution: {integrity: sha512-5zBT1J30uNIOAcxERtdJIuvRXRauyJGXRwGtWfrTiErX+DnB504SJyj7BbADR9m3v1Oo+TARZkbPzWSv7elbKA==}
+  valsem@0.0.4:
+    resolution: {integrity: sha512-5dbvHCFpu+U5I8sPBPOM7VSyUdRtgtroO4Rh+5z6kixd/Uyf2GdihYajkdwLP/sOyYrhVMt65kkdKYqlrhC4Vw==}
     engines: {node: '>=22'}
 
   vite-node@3.2.4:
@@ -1769,6 +1777,10 @@ snapshots:
 
   std-env@3.10.0: {}
 
+  stifinder@0.0.1(valsem@0.0.4):
+    dependencies:
+      valsem: 0.0.4
+
   strip-json-comments@3.1.1: {}
 
   strip-literal@3.1.0:
@@ -1821,7 +1833,7 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  valsem@0.0.2: {}
+  valsem@0.0.4: {}
 
   vite-node@3.2.4(@types/node@22.20.2):
     dependencies:

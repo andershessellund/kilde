@@ -17,6 +17,11 @@ import {
   combineValues,
 } from './async-value.js';
 import type { AsyncValue } from './async-value.js';
+import { asyncValueEquals, tupleEquals } from './async-value.js';
+import { createSignal } from './signal.js';
+import { combineAsync, wrapAsyncSignal } from './async-state.js';
+import type { Signal } from './types.js';
+const wrapAsync = <T,>(s: Signal<AsyncValue<T>>) => wrapAsyncSignal(s, () => {});
 
 // ---------------------------------------------------------------------------
 // Constructors
@@ -209,5 +214,51 @@ describe('combineValues', () => {
     const result = combineValues(errored<number>(err1), errored<string>(err2));
     expect(result.status).toBe('errored');
     expect((result as any).error).toBe(err1);
+  });
+});
+
+describe('asyncValueEquals', () => {
+  const eq = asyncValueEquals<{ n: number }>();
+  const v = { n: 1 };
+
+  it('compares status, payload identity, error identity, and stale presence', () => {
+    expect(eq(loading(), loading())).toBe(true);
+    expect(eq(available(v), available(v))).toBe(true);
+    expect(eq(available(v), available({ n: 1 }))).toBe(false);
+    expect(eq(loading(v), loading(v))).toBe(true);
+    expect(eq(loading(v), loading())).toBe(false);
+    expect(eq(loading(), available(v))).toBe(false);
+    const err = new Error('x');
+    expect(eq(errored(err), errored(err))).toBe(true);
+    expect(eq(errored(err), errored(new Error('x')))).toBe(false);
+    expect(eq(errored(err, v), errored(err, v))).toBe(true);
+    expect(eq(unavailable(), unavailable())).toBe(true);
+  });
+
+  it('takes a payload predicate', () => {
+    const structural = asyncValueEquals<{ n: number }>((a, b) => a.n === b.n);
+    expect(structural(available({ n: 1 }), available({ n: 1 }))).toBe(true);
+    expect(structural(loading({ n: 1 }), loading({ n: 1 }))).toBe(true);
+  });
+
+  it('tupleEquals compares element-wise with Object.is', () => {
+    expect(tupleEquals([1, v], [1, v])).toBe(true);
+    expect(tupleEquals([1, v], [1, { n: 1 }])).toBe(false);
+    expect(tupleEquals([1], [1, 2])).toBe(false);
+  });
+});
+
+describe('async layer does not emit redundant envelopes', () => {
+  it('combineAsync with an unrelated input change of equal value stays quiet', () => {
+    const a = createSignal<AsyncValue<number>>(available(1));
+    const b = createSignal<AsyncValue<number>>(available(2));
+    const combined = combineAsync([wrapAsync(a), wrapAsync(b)]);
+    const seen: unknown[] = [];
+    combined.observe('value', (x) => seen.push(x));
+    expect(seen).toHaveLength(1);
+    a.set(available(1)); // same status and value: nothing downstream
+    expect(seen).toHaveLength(1);
+    a.set(available(5));
+    expect(seen).toHaveLength(2);
   });
 });

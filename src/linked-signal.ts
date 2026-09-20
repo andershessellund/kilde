@@ -30,7 +30,7 @@ import type { OwnedOptions } from './owner.js';
 /** Sentinel for "no previous pull result yet". */
 const SENTINEL: unique symbol = Symbol('link.sentinel');
 
-export interface LinkOptions extends OwnedOptions {
+export interface LinkOptions<T = unknown> extends OwnedOptions {
   /**
    * Register the link with an owner (`owner`, else the ambient owner).
    *
@@ -40,6 +40,13 @@ export interface LinkOptions extends OwnedOptions {
    *   Use when the signal and link are created together (e.g., linkedSignal).
    */
   registerResource?: boolean;
+  /**
+   * Equality for the derivation's result. Default: `Object.is`. When the
+   * computation rebuilds a structurally equal value, this decides whether
+   * that counts as a change that overrides a manual `set()`. Pass the same
+   * predicate the signal uses.
+   */
+  equals?: (a: T, b: T) => boolean;
   /** @internal Signal already holds the correct initial value (set by linkedSignal). */
   _preSeeded?: boolean;
 }
@@ -83,7 +90,7 @@ export interface LinkOptions extends OwnedOptions {
 export function link<T>(
   signal: WritableSignal<T>,
   computation: (previous: T) => T,
-  opts?: LinkOptions,
+  opts?: LinkOptions<T>,
 ): () => void {
   const shouldRegister = opts?.registerResource !== false;
   let unsub: (() => void) | null = null;
@@ -91,10 +98,13 @@ export function link<T>(
 
   // Internal computed: tracks dependencies in computation body,
   // reads signal value untracked (snapshot for `previous`).
-  const derived = computed(() => {
-    const prev = untracked(() => signal());
-    return computation(prev);
-  });
+  const derived = computed(
+    () => {
+      const prev = untracked(() => signal());
+      return computation(prev);
+    },
+    opts?.equals ? { equals: opts.equals } : undefined,
+  );
 
   // Read hook: pull the derived computation fresh on every signal read.
   // Only overrides the stored value when the derived actually recomputed
@@ -207,6 +217,10 @@ export function linkedSignal<T>(
 ): WritableSignal<T> {
   const init = computation(undefined);
   const sig = createSignal(init, opts);
-  link(sig, computation as (prev: T) => T, { registerResource: false, _preSeeded: true });
+  link(sig, computation as (prev: T) => T, {
+    registerResource: false,
+    _preSeeded: true,
+    equals: opts?.equals,
+  });
   return sig;
 }

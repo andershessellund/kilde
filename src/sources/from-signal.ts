@@ -20,6 +20,7 @@ class SignalStream<T> implements Stream {
   #paused = true;
   #dirty = false;
   #disposed = false;
+  #delivered: { value: T } | null = null;
 
   constructor(signal: Signal<T>, sink: Sink<T>) {
     this.#signal = signal;
@@ -51,11 +52,16 @@ class SignalStream<T> implements Stream {
     this.#paused = false;
     if (this.#dirty) {
       this.#dirty = false;
-      this.#deliver(this.#signal());
+      const value = this.#signal();
+      // Conflation may land back on the value the sink already holds
+      // (A → B → A while paused): the sink is owed nothing then.
+      if (this.#delivered && Object.is(this.#delivered.value, value)) return;
+      this.#deliver(value);
     }
   }
 
   #deliver(value: T): void {
+    this.#delivered = { value };
     const result = this.#sink.next(value);
     if (result === PAUSE) {
       this.#paused = true;

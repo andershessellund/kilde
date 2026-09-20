@@ -20,8 +20,8 @@ function drive(s: { resume(): void }, sink: { completeCount: number }, max = 40)
 }
 
 describe('switchMap (exhaustive)', () => {
-  it('single outer value — maps to inner array', () => {
-    exhaustiveTest((oracle) => {
+  it('single outer value — maps to inner array', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([10], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, switchMap((x) => fromArray([x, x + 1])), assertProtocol()).connect(sink);
@@ -31,8 +31,8 @@ describe('switchMap (exhaustive)', () => {
     });
   });
 
-  it('single outer value — self-pausing inner', () => {
-    exhaustiveTest((oracle) => {
+  it('single outer value — self-pausing inner', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([10], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(
@@ -46,11 +46,11 @@ describe('switchMap (exhaustive)', () => {
     });
   });
 
-  it('two outer values — each inner completes before next arrives', () => {
+  it('two outer values — each inner completes before next arrives', async () => {
     // With fromArray inners and sequential outer, each inner completes
     // synchronously before the next outer value — unless the downstream
     // paused, in which case the pending inner is switched away.
-    exhaustiveTest((oracle) => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, switchMap((x) => fromArray([x * 10, x * 10 + 1])), assertProtocol()).connect(sink);
@@ -88,8 +88,8 @@ describe('switchMap (exhaustive)', () => {
     expect(sink.values).toContain(99);
   });
 
-  it('empty outer — completes immediately', () => {
-    exhaustiveTest((oracle) => {
+  it('empty outer — completes immediately', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource<number>([], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, switchMap((x) => fromArray([x])), assertProtocol()).connect(sink);
@@ -99,8 +99,8 @@ describe('switchMap (exhaustive)', () => {
     });
   });
 
-  it('outer with empty inner', () => {
-    exhaustiveTest((oracle) => {
+  it('outer with empty inner', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, switchMap(() => empty<number>()), assertProtocol()).connect(sink);
@@ -110,8 +110,8 @@ describe('switchMap (exhaustive)', () => {
     });
   });
 
-  it('mixed empty and non-empty inners', () => {
-    exhaustiveTest((oracle) => {
+  it('mixed empty and non-empty inners', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(
@@ -125,8 +125,8 @@ describe('switchMap (exhaustive)', () => {
     });
   });
 
-  it('three outer values with multi-value inners', () => {
-    exhaustiveTest((oracle) => {
+  it('three outer values with multi-value inners', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(

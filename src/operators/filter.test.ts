@@ -17,8 +17,8 @@ function drive(s: { resume(): void }, sink: { completeCount: number }, max = 40)
 }
 
 describe('filter (exhaustive)', () => {
-  it('even numbers — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('even numbers — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3, 4, 5, 6], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(
@@ -32,8 +32,8 @@ describe('filter (exhaustive)', () => {
     });
   });
 
-  it('all pass — identity', () => {
-    exhaustiveTest((oracle) => {
+  it('all pass — identity', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(
@@ -47,8 +47,8 @@ describe('filter (exhaustive)', () => {
     });
   });
 
-  it('none pass — empty output', () => {
-    exhaustiveTest((oracle) => {
+  it('none pass — empty output', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(
@@ -62,8 +62,8 @@ describe('filter (exhaustive)', () => {
     });
   });
 
-  it('error in predicate — reports error', () => {
-    exhaustiveTest((oracle) => {
+  it('error in predicate — reports error', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(

@@ -3,77 +3,11 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from 'vitest';
-import { ExhaustiveOracle, incrementSequence } from './oracle.js';
 import { testSource } from './test-source.js';
 import { testSink } from './test-sink.js';
 import { exhaustiveTest } from './exhaustive.js';
 import { toArray } from '../operators/to-array.js';
 import { stream } from '../stream.js';
-
-describe('ExhaustiveOracle', () => {
-  it('first run returns 0 for all decisions', () => {
-    const oracle = new ExhaustiveOracle([]);
-    expect(oracle.integer(3)).toBe(0); // first unknown → 0
-    expect(oracle.integer(5)).toBe(0);
-    expect(oracle.getSequence()).toEqual([
-      { picked: 0, range: 3 },
-      { picked: 0, range: 5 },
-    ]);
-  });
-
-  it('replays known decisions', () => {
-    const oracle = new ExhaustiveOracle([
-      { picked: 1, range: 3 },
-      { picked: 2, range: 5 },
-    ]);
-    expect(oracle.integer(3)).toBe(1);
-    expect(oracle.integer(5)).toBe(2);
-  });
-
-  it('extends with 0 when past known decisions', () => {
-    const oracle = new ExhaustiveOracle([{ picked: 1, range: 3 }]);
-    expect(oracle.integer(3)).toBe(1); // replay
-    expect(oracle.integer(4)).toBe(0); // new → 0
-    expect(oracle.getSequence()).toHaveLength(2);
-  });
-});
-
-describe('incrementSequence', () => {
-  it('increments last digit', () => {
-    const seq = [
-      { picked: 0, range: 3 },
-      { picked: 0, range: 2 },
-    ];
-    const result = incrementSequence(seq);
-    expect(result).toEqual([
-      { picked: 0, range: 3 },
-      { picked: 1, range: 2 },
-    ]);
-  });
-
-  it('carries over (drops overflowed digit)', () => {
-    const seq = [
-      { picked: 0, range: 3 },
-      { picked: 1, range: 2 },
-    ];
-    const result = incrementSequence(seq);
-    // Last digit overflows → popped, first digit incremented
-    expect(result).toEqual([{ picked: 1, range: 3 }]);
-  });
-
-  it('returns empty when fully explored', () => {
-    const seq = [
-      { picked: 2, range: 3 },
-      { picked: 1, range: 2 },
-    ];
-    const result = incrementSequence(seq);
-    expect(result).toEqual([]);
-  });
-
-  it('empty input stays empty', () => {
-    expect(incrementSequence([])).toEqual([]);
-  });
-});
 
 describe('testSource', () => {
   it('emits values with oracle controlling pause', () => {
@@ -104,9 +38,45 @@ describe('testSink', () => {
 });
 
 describe('exhaustiveTest', () => {
-  it('explores all permutations of a trivial case', () => {
+  it('runs the body once per leaf of the decision tree', async () => {
     let runCount = 0;
-    exhaustiveTest((oracle) => {
+    const stats = await exhaustiveTest((oracle) => {
+      runCount++;
+      oracle.integer(2);
+      oracle.integer(2);
+      oracle.integer(2);
+    });
+    expect(runCount).toBe(8);
+    expect(stats.runs).toBe(8);
+    expect(stats.completed).toBe(true);
+  });
+
+  it('reports the failure with the fewest deviations, not the first found', async () => {
+    // Fails on [1, 1] (two deviations) and on [0, 0, 1] (one deviation).
+    await expect(
+      exhaustiveTest((oracle) => {
+        const a = oracle.integer(2);
+        const b = oracle.integer(2);
+        if (a === 1 && b === 1) throw new Error('two deviations');
+        const c = oracle.integer(2);
+        if (a === 0 && b === 0 && c === 1) throw new Error('one deviation');
+      }),
+    ).rejects.toThrow(/1 deviation:[\s\S]*3 decisions[\s\S]*decisions: \[0, 0, 1\][\s\S]*one deviation/);
+  });
+
+  it('rejects a body that is not deterministic', async () => {
+    let calls = 0;
+    await expect(
+      exhaustiveTest((oracle) => {
+        calls++;
+        oracle.integer(calls === 1 ? 2 : 3);
+      }),
+    ).rejects.toThrow(/not deterministic/);
+  });
+
+  it('explores all permutations of a trivial case', async () => {
+    let runCount = 0;
+    await exhaustiveTest((oracle) => {
       runCount++;
       const choice = oracle.integer(2); // 0 or 1
       if (choice === 0) {
@@ -118,9 +88,9 @@ describe('exhaustiveTest', () => {
     expect(runCount).toBe(2);
   });
 
-  it('explores multiple decision points', () => {
+  it('explores multiple decision points', async () => {
     let runCount = 0;
-    exhaustiveTest((oracle) => {
+    await exhaustiveTest((oracle) => {
       runCount++;
       oracle.integer(2); // 2 choices
       oracle.integer(3); // 3 choices
@@ -128,12 +98,12 @@ describe('exhaustiveTest', () => {
     expect(runCount).toBe(6); // 2 * 3
   });
 
-  it('throws on first failure with permutation info', () => {
-    expect(() => {
+  it('throws on failure with the decision sequence', async () => {
+    await expect(
       exhaustiveTest((oracle) => {
         const v = oracle.integer(3);
         if (v === 2) throw new Error('bad permutation');
-      });
-    }).toThrow(/permutation/i);
+      }),
+    ).rejects.toThrow(/decisions: \[2\]|decisions: \[2\/3\]/);
   });
 });

@@ -16,8 +16,8 @@ function drive(s: { resume(): void }, sink: { completeCount: number }, max = 40)
 }
 
 describe('pausable (exhaustive)', () => {
-  it('three values — all pause orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('three values — all pause orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, pausable(), assertProtocol()).connect(sink);
@@ -27,8 +27,8 @@ describe('pausable (exhaustive)', () => {
     });
   });
 
-  it('five values — buffer drain orderings', () => {
-    exhaustiveTest((oracle) => {
+  it('five values — buffer drain orderings', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([1, 2, 3, 4, 5], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, pausable(), assertProtocol()).connect(sink);
@@ -38,8 +38,8 @@ describe('pausable (exhaustive)', () => {
     });
   });
 
-  it('single value', () => {
-    exhaustiveTest((oracle) => {
+  it('single value', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource([42], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, pausable(), assertProtocol()).connect(sink);
@@ -49,8 +49,8 @@ describe('pausable (exhaustive)', () => {
     });
   });
 
-  it('empty source', () => {
-    exhaustiveTest((oracle) => {
+  it('empty source', async () => {
+    await exhaustiveTest((oracle) => {
       const src = testSource<number>([], { oracle });
       const sink = testSink<number>({ oracle });
       const s = pipe(src, pausable(), assertProtocol()).connect(sink);

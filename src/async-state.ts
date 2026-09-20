@@ -21,7 +21,10 @@ import {
   combineValues,
   isAvailable,
   isErrored,
+  asyncValueEquals,
+  tupleEquals,
 } from './async-value.js';
+import type { Equals } from './async-value.js';
 import { createSignal, computed } from './signal.js';
 import { fromSignal } from './sources/from-signal.js';
 import { currentOwner } from './owner.js';
@@ -163,7 +166,7 @@ function wrapManagedAsyncSignal<T>(
  */
 export function alwaysAvailable<T>(sig: Signal<T>): AsyncSignal<T> {
   return wrapAsyncSignal(
-    computed(() => available(sig())),
+    computed(() => available(sig()), { equals: asyncValueEquals<T>() }),
     () => {}, // no-op retry — always available
   );
 }
@@ -196,9 +199,10 @@ export function alwaysAvailable<T>(sig: Signal<T>): AsyncSignal<T> {
 export function mapAsync<A, B>(
   source: AsyncSignal<A>,
   fn: (value: AsyncValue<A>) => AsyncValue<B>,
+  options?: { equals?: Equals<B> },
 ): AsyncSignal<B> {
   return wrapAsyncSignal(
-    computed(() => fn(source())),
+    computed(() => fn(source()), { equals: asyncValueEquals(options?.equals) }),
     () => source.retry(),
   );
 }
@@ -231,7 +235,8 @@ export function mapAsync<A, B>(
 export function combineAsync<T extends readonly unknown[]>(
   signals: { readonly [K in keyof T]: AsyncSignal<T[K]> },
 ): AsyncSignal<T> {
-  const inner = createSignal<AsyncValue<T>>(unavailable<T>());
+  const equals = asyncValueEquals<T>(tupleEquals);
+  const inner = createSignal<AsyncValue<T>>(unavailable<T>(), { equals });
   let inputConnections: Stream[] = [];
   let combinedConnection: Stream | null = null;
 
@@ -240,7 +245,7 @@ export function combineAsync<T extends readonly unknown[]>(
       readonly [K in keyof T]: AsyncValue<T[K]>;
     };
     return combineValues<T>(...inputValues);
-  });
+  }, { equals });
 
   function activate(): void {
     // Subscribe to input signals to activate ref-counted sources
@@ -292,8 +297,9 @@ export function combineAsync<T extends readonly unknown[]>(
 // ---------------------------------------------------------------------------
 
 /** Options for {@link computedAsync}. */
-export interface ComputedAsyncOptions {
-  keepStale?: boolean;
+export interface ComputedAsyncOptions<R = unknown> {
+  /** Payload equality. Default: `Object.is`. */
+  equals?: Equals<R>;
 }
 
 /**
@@ -308,7 +314,7 @@ export type ComputedAsyncReturn<R> = Promise<R> | AsyncSignal<R> | AsyncValue<R>
 
 /** Wrap an already-started Promise as an AsyncSignal. */
 function wrapPromise<T>(promise: Promise<T>): AsyncSignal<T> {
-  const state = createSignal<AsyncValue<T>>(loading<T>());
+  const state = createSignal<AsyncValue<T>>(loading<T>(), { equals: asyncValueEquals<T>() });
   promise.then(
     (value) => state.set(available(value)),
     (err) => state.set(errored(err)),
@@ -318,7 +324,7 @@ function wrapPromise<T>(promise: Promise<T>): AsyncSignal<T> {
 
 /** Wrap a static AsyncValue as an AsyncSignal. */
 function wrapStaticAsyncValue<T>(value: AsyncValue<T>): AsyncSignal<T> {
-  const sig = computed<AsyncValue<T>>(() => value);
+  const sig = computed<AsyncValue<T>>(() => value, { equals: asyncValueEquals<T>() });
   return wrapAsyncSignal(sig, () => {});
 }
 
@@ -363,11 +369,13 @@ export function asAsyncSignal<R>(result: ComputedAsyncReturn<R>): AsyncSignal<R>
 export function computedAsync<T extends readonly unknown[], R>(
   signals: { readonly [K in keyof T]: AsyncSignal<T[K]> },
   fn: (...values: NoInfer<T>) => Promise<R>,
-  _options?: ComputedAsyncOptions,
+  options?: ComputedAsyncOptions<R>,
 ): ReloadableAsyncSignal<R> {
   const combined = combineAsync(signals as AsyncSignal<any>[]);
-  return switchMapAsync(combined, (values: any[]) =>
-    createAsyncSignal(() => fn(...(values as unknown as T))),
+  return switchMapAsync(
+    combined,
+    (values: any[]) => createAsyncSignal(() => fn(...(values as unknown as T)), options),
+    options,
   );
 }
 
@@ -394,8 +402,13 @@ export function computedAsync<T extends readonly unknown[], R>(
  * await user.reload();   // force re-fetch
  * ```
  */
-export function createAsyncSignal<T>(fn: () => Promise<T>): ReloadableAsyncSignal<T> {
-  const state: WritableSignal<AsyncValue<T>> = createSignal<AsyncValue<T>>(unavailable<T>());
+export function createAsyncSignal<T>(
+  fn: () => Promise<T>,
+  options?: { equals?: Equals<T> },
+): ReloadableAsyncSignal<T> {
+  const state: WritableSignal<AsyncValue<T>> = createSignal<AsyncValue<T>>(unavailable<T>(), {
+    equals: asyncValueEquals(options?.equals),
+  });
   let reloadWaiters: ReloadWaiter<T>[] | null = null;
   let version = 0;
   let lastGoodOutput: T | undefined;
@@ -485,8 +498,11 @@ export function createAsyncSignal<T>(fn: () => Promise<T>): ReloadableAsyncSigna
 export function switchMapAsync<A, B>(
   source: AsyncSignal<A>,
   fn: (value: A) => AsyncSignal<B>,
+  options?: { equals?: Equals<B> },
 ): ReloadableAsyncSignal<B> {
-  const inner = createSignal<AsyncValue<B>>(unavailable<B>());
+  const inner = createSignal<AsyncValue<B>>(unavailable<B>(), {
+    equals: asyncValueEquals(options?.equals),
+  });
   let sourceConnection: Stream | null = null;
   let innerConnection: Stream | null = null;
   let currentInner: AsyncSignal<B> | null = null;
@@ -622,7 +638,7 @@ export interface DerivedValue<R> {
 export type DeriveResourceReturn<R> = AsyncValue<DerivedValue<R>> | Promise<DerivedValue<R>>;
 
 /** Options for {@link deriveResource}. */
-export interface DeriveResourceOptions extends OwnedOptions {
+export interface DeriveResourceOptions<R = unknown> extends OwnedOptions {
   /**
    * When `true`, the state carries the last successful output
    * as a stale value during loading/error transitions.
@@ -631,6 +647,8 @@ export interface DeriveResourceOptions extends OwnedOptions {
   keepStale?: boolean;
   /** Name for diagnostics (owner registration, spawned tasks). */
   name?: string;
+  /** Payload equality for the derived value. Default: `Object.is`. */
+  equals?: Equals<R>;
   /**
    * Begin observing the input immediately. Default: `true`.
    * With `false`, nothing happens until `.start()` is called — useful when
@@ -671,13 +689,15 @@ export interface DeriveResourceOptions extends OwnedOptions {
 export function deriveResource<T, R>(
   signal: AsyncSignal<T>,
   fn: (value: NoInfer<T>) => DeriveResourceReturn<R>,
-  options: DeriveResourceOptions = {},
+  options: DeriveResourceOptions<R> = {},
 ): ManagedAsyncSignal<R> {
   const keepStale = options.keepStale ?? true;
   const name = options.name ?? 'deriveResource';
   const owner: Owner = options.owner ?? currentOwner();
 
-  const inner = createSignal<AsyncValue<R>>(loading<R>());
+  const inner = createSignal<AsyncValue<R>>(loading<R>(), {
+    equals: asyncValueEquals<R>(options.equals),
+  });
   let lastGoodOutput: R | undefined;
   let currentResource: DerivedValue<R> | null = null;
   let currentTask: OwnedTask<DerivedValue<R>> | null = null;

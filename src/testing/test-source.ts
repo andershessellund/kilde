@@ -35,13 +35,21 @@ class TestSourceStream<T> implements Stream {
       if (result === PAUSE) {
         // Nothing left: the oracle decides whether completion arrives now
         // (while the sink is paused) or on the next resume().
-        if (this.#index >= this.values.length && this.oracle && this.oracle.integer(2) === 1) {
+        if (
+          this.#index >= this.values.length &&
+          this.oracle &&
+          this.oracle.integer(2, 'source completes while the sink is paused') === 1
+        ) {
           this.#complete();
         }
         return;
       }
       // The oracle may decide the source self-pauses here.
-      if (this.oracle && this.#index < this.values.length && this.oracle.integer(2) === 1) {
+      if (
+        this.oracle &&
+        this.#index < this.values.length &&
+        this.oracle.integer(2, `source self-pauses after value #${this.#index}`) === 1
+      ) {
         return;
       }
     }

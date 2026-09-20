@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from 'vitest';
+import { deepEqual } from 'valsem';
 import type { Sink } from './types.js';
 import { PAUSE } from './types.js';
 import { createSignal, toSignal, computed } from './signal.js';
@@ -141,9 +142,9 @@ describe('computed', () => {
     expect(sum()).toBe(3);
   });
 
-  it('skips notification when computed result is deeply equal', () => {
+  it('skips notification when computed result is equal under a custom equals', () => {
     const input = createSignal({ x: 1, y: 2 });
-    const derived = computed(() => ({ sum: input().x + input().y }));
+    const derived = computed(() => ({ sum: input().x + input().y }), { equals: deepEqual });
 
     const sink = recordSink<{ sum: number }>();
     const s = fromSignal(derived).connect(sink);

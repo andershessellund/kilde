@@ -21,8 +21,8 @@ describe('empty', () => {
     expect(sink.completeCount).toBe(0);
   });
 
-  it('completes exactly once no matter how often resume() is called', () => {
-    exhaustiveTest((oracle) => {
+  it('completes exactly once no matter how often resume() is called', async () => {
+    await exhaustiveTest((oracle) => {
       const sink = testSink<never>({ oracle });
       const s = pipe(empty(), assertProtocol()).connect(sink);
       s.resume();

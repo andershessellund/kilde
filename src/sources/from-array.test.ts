@@ -26,8 +26,8 @@ describe('fromArray', () => {
     expect(stream(fromArray({ length: 2, 0: 'x', 1: 'y' }), toArray())).toEqual(['x', 'y']);
   });
 
-  it('respects PAUSE and completes exactly once under every pause pattern', () => {
-    const runs = exhaustiveTest((oracle) => {
+  it('respects PAUSE and completes exactly once under every pause pattern', async () => {
+    const runs = await exhaustiveTest((oracle) => {
       const sink = testSink<number>({ oracle });
       const s = pipe(fromArray([1, 2, 3]), assertProtocol()).connect(sink);
       drive(s, sink);
@@ -38,7 +38,7 @@ describe('fromArray', () => {
       s.resume();
       expect(sink.completeCount).toBe(1);
     });
-    expect(runs).toBe(8);
+    expect(runs.runs).toBe(8);
   });
 
   it('resume() after completion of an empty array does not re-complete', () => {

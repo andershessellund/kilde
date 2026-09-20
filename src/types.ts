@@ -232,7 +232,7 @@ export interface Scheduler {
  * Signals are **callable** — invoke `signal()` to read the current value.
  * This is the primary way to access signal state.
  *
- * Only emits when the value actually changes (deep equality by default).
+ * Only emits when the value actually changes (`Object.is` by default).
  *
  * Calling `signal()` inside a `computed()` callback automatically registers
  * this signal as a dependency.

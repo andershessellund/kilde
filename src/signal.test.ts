@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Sink, Source } from './types.js';
 import { PAUSE } from './types.js';
 import { createSignal, toSignal, computed, microtaskScheduler } from './signal.js';
+import { deepEqual } from 'valsem';
 import { fromArray } from './sources/from-array.js';
 import type { Scheduler } from './types.js';
 import { pipe } from './stream.js';
@@ -70,14 +71,28 @@ describe('createSignal', () => {
     expect(s()).toBe(15);
   });
 
-  it('set skips deeply equal values', () => {
-    const s = createSignal({ a: 1 });
+  it('set skips the same value (Object.is by default)', () => {
+    const one = { a: 1 };
+    const s = createSignal(one);
     const sink = recordSink<{ a: number }>();
     const stream = fromSignal(s).connect(sink);
     stream.resume(); // gets { a: 1 }
 
-    s.set({ a: 1 }); // deeply equal — should skip
-    s.set({ a: 2 }); // different — should emit
+    s.set(one); // same reference — skipped
+    s.set({ a: 1 }); // structurally equal but a new object — emitted by default
+    s.set({ a: 2 });
+
+    expect(sink.values).toEqual([{ a: 1 }, { a: 1 }, { a: 2 }]);
+  });
+
+  it('set skips structurally equal values with a custom equals', () => {
+    const s = createSignal({ a: 1 }, { equals: deepEqual });
+    const sink = recordSink<{ a: number }>();
+    const stream = fromSignal(s).connect(sink);
+    stream.resume();
+
+    s.set({ a: 1 }); // deeply equal — skipped
+    s.set({ a: 2 });
 
     expect(sink.values).toEqual([{ a: 1 }, { a: 2 }]);
   });
@@ -275,9 +290,9 @@ describe('toSignal', () => {
     expect(sink.values).toEqual([0, 1, 2]);
   });
 
-  it('deep equality on upstream objects', () => {
+  it('custom equality on upstream objects', () => {
     const relay = createRelay<{ x: number }>();
-    const sig = toSignal({ initial: { x: 0 } })(relay);
+    const sig = toSignal({ initial: { x: 0 }, equals: deepEqual })(relay);
 
     const sink = recordSink<{ x: number }>();
     const stream = fromSignal(sig).connect(sink);

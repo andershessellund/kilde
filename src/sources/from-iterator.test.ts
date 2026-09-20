@@ -26,8 +26,8 @@ describe('fromIterator', () => {
     expect(stream(fromIterator(naturals()), take(3), toArray())).toEqual([0, 1, 2]);
   });
 
-  it('respects PAUSE and completes exactly once under every pause pattern', () => {
-    exhaustiveTest((oracle) => {
+  it('respects PAUSE and completes exactly once under every pause pattern', async () => {
+    await exhaustiveTest((oracle) => {
       const sink = testSink<number>({ oracle });
       const s = pipe(fromIterator([1, 2, 3][Symbol.iterator]()), assertProtocol()).connect(sink);
       drive(s, sink);
@@ -55,8 +55,8 @@ describe('fromIterator', () => {
     expect(sink.completeCount).toBe(1);
   });
 
-  it('routes an exception from iterator.next() to sink.error() and stops', () => {
-    exhaustiveTest((oracle) => {
+  it('routes an exception from iterator.next() to sink.error() and stops', async () => {
+    await exhaustiveTest((oracle) => {
       function* failing(): Generator<number> {
         yield 1;
         yield 2;

@@ -9,7 +9,8 @@
 import type { Source, Signal, Stream } from '../types.js';
 import { PAUSE } from '../types.js';
 import type { AsyncValue } from '../async-value.js';
-import { loading, available, errored, unavailable, isErrored } from '../async-value.js';
+import { loading, available, errored, unavailable, isErrored, asyncValueEquals } from '../async-value.js';
+import type { Equals } from '../async-value.js';
 import { createSignal } from '../signal.js';
 import type { OwnedOptions } from '../owner.js';
 import type { AsyncSignal } from '../async-state.js';
@@ -20,7 +21,7 @@ import { registerWithOwner } from '../internal/owned.js';
 // Options
 // ---------------------------------------------------------------------------
 
-export interface ToAsyncSignalOptions extends OwnedOptions {
+export interface ToAsyncSignalOptions<T = unknown> extends OwnedOptions {
   /**
    * When `true`, connects to the source immediately and registers for
    * structured teardown with the owner (`owner`, else the ambient owner).
@@ -29,6 +30,8 @@ export interface ToAsyncSignalOptions extends OwnedOptions {
    * on the first observer and disconnects when the last observer leaves.
    */
   hot?: boolean;
+  /** Payload equality. Default: `Object.is`. */
+  equals?: Equals<T>;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,14 +67,14 @@ export interface ToAsyncSignalOptions extends OwnedOptions {
  * ```
  */
 export function toAsyncSignal<T>(
-  opts?: ToAsyncSignalOptions,
+  opts?: ToAsyncSignalOptions<T>,
 ): (source: Source<T>) => AsyncSignal<T> {
   const hot = opts?.hot ?? false;
 
   return (source: Source<T>): AsyncSignal<T> => {
-    const state = createSignal<AsyncValue<T>>(
-      hot ? loading<T>() : unavailable<T>(),
-    );
+    const state = createSignal<AsyncValue<T>>(hot ? loading<T>() : unavailable<T>(), {
+      equals: asyncValueEquals<T>(opts?.equals),
+    });
     let upstream: Stream | null = null;
     let lastGoodValue: T | undefined;
     // Hot mode: the owner has torn us down — never reconnect.

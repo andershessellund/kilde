@@ -205,3 +205,45 @@ export function combineValues<T extends readonly unknown[]>(
       return available(values.map((v) => (v as Available<unknown>).value) as unknown as T);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Equality — comparing envelopes without walking payloads
+// ---------------------------------------------------------------------------
+
+/** Equality predicate over a payload type. */
+export type Equals<T> = (a: T, b: T) => boolean;
+
+/**
+ * Build an equality predicate over `AsyncValue<T>` from one over `T`.
+ *
+ * Two envelopes are equal when their status matches, their `error` is the
+ * same object, and their `value` or `staleValue` compare equal under
+ * `payload`, which defaults to `Object.is`. A stale value is "present" when
+ * it is not `undefined`, the same rule the constructors use.
+ * Four comparisons and no walk: the async layer uses it as the default
+ * `equals` on every signal it creates, so a refresh that lands on the same
+ * state, or `loading()` after `loading()`, never notifies anyone.
+ */
+export function asyncValueEquals<T>(payload: Equals<T> = Object.is): Equals<AsyncValue<T>> {
+  return (a, b) => {
+    if (a === b) return true;
+    if (a.status !== b.status) return false;
+    if (a.status === 'available') return payload(a.value, (b as Available<T>).value);
+    if (a.status === 'errored' && a.error !== (b as Errored<T>).error) return false;
+    const sa = (a as Loading<T>).staleValue;
+    const sb = (b as Loading<T>).staleValue;
+    if (sa === undefined || sb === undefined) return sa === sb;
+    return payload(sa, sb);
+  };
+}
+
+/**
+ * Element-wise equality over tuples, `Object.is` per element. What
+ * `combineAsync` uses for its combined payload.
+ */
+export function tupleEquals<T extends readonly unknown[]>(a: T, b: T): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (!Object.is(a[i], b[i])) return false;
+  return true;
+}

@@ -324,3 +324,16 @@ describe('link() after a pushed derivation', () => {
     stop();
   });
 });
+
+describe('linkedSignal equals', () => {
+  it('forwards equals to the derivation so an equal rebuild does not override a manual set', () => {
+    const options = createSignal([1, 2, 3]);
+    const structural = (a: { v: number }, b: { v: number }) => a.v === b.v;
+    const sel = linkedSignal(() => ({ v: options()[0] }), { equals: structural });
+    sel.set({ v: 99 });
+    options.set([1, 2, 3, 4]); // derivation rebuilds { v: 1 }, equal to before: not a change
+    expect(sel().v).toBe(99);
+    options.set([7]); // a real change overrides
+    expect(sel().v).toBe(7);
+  });
+});

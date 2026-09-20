@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from 'vitest';
+import { deepEqual } from 'valsem';
 import type { Sink } from './types.js';
 import { PAUSE } from './types.js';
 import { createStore, intoStore } from './store.js';
@@ -83,8 +84,8 @@ describe('createStore', () => {
     expect(sink.values).toEqual([0, 1, 11]);
   });
 
-  it('deduplicates via deep equality', () => {
-    const s = createStore({ a: 1 });
+  it('deduplicates via a custom equals', () => {
+    const s = createStore({ a: 1 }, { equals: deepEqual });
     const sink = recordSink<{ a: number }>();
     const stream = s.connect(sink);
     stream.resume();

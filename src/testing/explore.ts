@@ -18,7 +18,7 @@
 // state it reached.
 // ---------------------------------------------------------------------------
 
-import { StateSpaceCache, exploreIteratively } from 'stifinder';
+import { exploreIteratively } from 'stifinder';
 import type { DecisionLabel, DecisionOracle } from './oracle.js';
 
 /** Outcome of the body for one prefix, recorded per state along the default chain. */
@@ -81,8 +81,19 @@ export interface ExploreTestStats {
   edges: number;
   /** Highest deviation budget that completed. */
   maxDeviationsReached: number;
-  /** Whether the space was exhausted. */
+  /**
+   * Whether exploration finished within `maxEdges` and `timeoutMs`. It is
+   * always true here, since exploreTest rejects otherwise, and it clears only
+   * the budget explored: see `exhaustive`.
+   */
   completed: boolean;
+  /**
+   * Whether every decision sequence was explored. False only when
+   * `maxDeviations` stopped the search: the body then passed on every
+   * sequence with up to `maxDeviationsReached` deviations, and nothing is
+   * known about the rest.
+   */
+  exhaustive: boolean;
   /** Wall-clock milliseconds. */
   ms: number;
 }
@@ -163,28 +174,29 @@ export async function exploreTest(
     return entry;
   }
 
-  const cache = new StateSpaceCache<number[], number>({
-    initialState: [],
-    async getEvents(state) {
-      const entry = entryFor(state);
-      if (entry.kind !== 'branch') return [];
-      const events = [];
-      for (let k = 0; k < entry.range; k++) events.push({ event: k, cost: [] });
-      return events;
+  const space = await exploreIteratively<number[], number>(
+    {
+      initialState: [],
+      getEvents(state) {
+        const entry = entryFor(state);
+        if (entry.kind !== 'branch') return [];
+        const events = [];
+        for (let k = 0; k < entry.range; k++) events.push({ event: k });
+        return events;
+      },
+      applyEvent(state, event) {
+        const next = [...state, event];
+        const entry = entryFor(next);
+        if (entry.kind === 'error') return { error: entry.error };
+        return { to: next };
+      },
     },
-    async applyEvent(state, event) {
-      const next = [...state, event];
-      const entry = entryFor(next);
-      if (entry.kind === 'error') return { error: entry.error };
-      return { to: next };
+    {
+      maxDeviations: options.maxDeviations ?? Infinity,
+      maxEdges: options.maxEdges ?? Infinity,
+      timeoutMs: options.timeoutMs,
     },
-  });
-
-  const space = await exploreIteratively(cache, {
-    maxDeviations: options.maxDeviations ?? Number.MAX_SAFE_INTEGER,
-    maxEdges: options.maxEdges ?? Number.MAX_SAFE_INTEGER,
-    timeoutMs: options.timeoutMs,
-  });
+  );
 
   const stats: ExploreTestStats = {
     runs,
@@ -192,6 +204,7 @@ export async function exploreTest(
     edges: space.edgesComputed,
     maxDeviationsReached: space.maxDeviationsReached,
     completed: space.completed,
+    exhaustive: space.exhaustive,
     ms: performance.now() - started,
   };
 

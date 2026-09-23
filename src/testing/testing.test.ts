@@ -49,6 +49,23 @@ describe('exhaustiveTest', () => {
     expect(runCount).toBe(8);
     expect(stats.runs).toBe(8);
     expect(stats.completed).toBe(true);
+    expect(stats.exhaustive).toBe(true);
+  });
+
+  it('says a space bounded by maxDeviations was not exhausted', async () => {
+    const stats = await exhaustiveTest(
+      (oracle) => {
+        oracle.integer(2);
+        oracle.integer(2);
+        oracle.integer(2);
+      },
+      { maxDeviations: 1 },
+    );
+    // The plain schedule, then one run per single deviation.
+    expect(stats.runs).toBe(4);
+    expect(stats.maxDeviationsReached).toBe(1);
+    expect(stats.completed).toBe(true);
+    expect(stats.exhaustive).toBe(false);
   });
 
   it('reports the failure with the fewest deviations, not the first found', async () => {

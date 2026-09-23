@@ -360,7 +360,9 @@ while the sink is paused; `exhaustiveTest` explores every decision sequence
 with [stifinder](https://github.com/andershessellund/stifinder), fewest
 departures from the plain schedule first, and reports the smallest failing
 one with each departure named: "sink pauses after value #2", "source
-completes while the sink is paused". `assertProtocol()` is an operator that throws on any breach of the
+completes while the sink is paused". A space too large to exhaust can be
+bounded with `{ maxDeviations }`; the statistics it resolves with say whether
+the search was `exhaustive`. `assertProtocol()` is an operator that throws on any breach of the
 stream protocol. Put it after the operator under test and every
 interleaving becomes a conformance check. If an operator has an ordering
 bug, this finds it.

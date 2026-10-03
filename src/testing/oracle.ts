@@ -2,9 +2,9 @@
 // DecisionOracle — abstract decision point for state-space exploration
 //
 // testSource and testSink ask the oracle at every point where they could
-// pause, self-pause, or deliver a terminal event. The explorer behind
-// exhaustiveTest (see explore.ts) supplies the oracle and enumerates the
-// decision sequences.
+// pause, self-pause, or deliver a terminal event. exhaustiveTest supplies
+// stifinder's `Decisions`, of which this is the `integer` method, and
+// stifinder enumerates the decision sequences.
 // ---------------------------------------------------------------------------
 
 /**
@@ -21,7 +21,8 @@ export interface DecisionOracle {
    *
    * `label` says what a non-zero pick means, in plain words, so a failure
    * report can list the deviations that led to it ("sink pauses after value
-   * #2"). A function receives the pick, for ranges above 2.
+   * #2"). A function is given every pick, 0 included, and says how it
+   * reads.
    */
   integer(range: number, label?: DecisionLabel): number;
 }

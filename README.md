@@ -28,7 +28,8 @@ kilde has no dependencies. Two optional entry points have an optional peer
 each: `kilde/valsem` needs [valsem](https://github.com/andershessellund/valsem)
 for value semantics, and `kilde/testing` needs
 [stifinder](https://github.com/andershessellund/stifinder) for state-space
-exploration. Install them only if you import those.
+exploration, which needs valsem in turn. Install them only if you import
+those.
 
 ## Signals
 
@@ -265,12 +266,12 @@ const db = deriveResource(config, async (cfg) => {
 
 ```ts
 import { produced } from 'kilde/valsem';
-import { draft } from 'valsem';
+import { draftOf } from 'valsem';
 
 const open = produced(() => todos().filter((t) => !t.done));
 
 const totalled = produced(() => {
-  const order = draft(currentOrder());
+  const order = draftOf(currentOrder());
   order.total = order.lines.reduce((sum, l) => sum + l.price, 0);
   return order;
 });
@@ -280,7 +281,7 @@ const totalled = produced(() => {
 [valsem](https://github.com/andershessellund/valsem) value: structurally
 equal results are the same instance, so the `Object.is` default already
 deduplicates them and everything downstream. Reads inside the recipe are
-plain frozen values at native speed; call `draft()` only on the inputs you
+plain frozen values at native speed; call `draftOf()` only on the inputs you
 want to edit with mutable syntax, and untouched parts keep their identity.
 `SignalDeduplicator`, a keyed cache of signals with structural keys that
 evicts entries on `'deactivate'`, lives here too. `kilde/valsem` needs
@@ -360,9 +361,13 @@ while the sink is paused; `exhaustiveTest` explores every decision sequence
 with [stifinder](https://github.com/andershessellund/stifinder), fewest
 departures from the plain schedule first, and reports the smallest failing
 one with each departure named: "sink pauses after value #2", "source
-completes while the sink is paused". A space too large to exhaust can be
-bounded with `{ maxDeviations }`; the statistics it resolves with say whether
-the search was `exhaustive`. `assertProtocol()` is an operator that throws on any breach of the
+completes while the sink is paused". The failure is stifinder's
+`ViolationError`, and `runOnce(body, error)` from stifinder runs that one
+sequence again, under a debugger if you like. The oracle is stifinder's
+`Decisions`, so a body can also ask it `maybe` and `choose`, and a body that
+returns a promise is awaited. A space too large to exhaust can be bounded
+with `{ maxDeviations }`; the statistics it resolves with say whether the
+search was `exhaustive`. `assertProtocol()` is an operator that throws on any breach of the
 stream protocol. Put it after the operator under test and every
 interleaving becomes a conformance check. If an operator has an ordering
 bug, this finds it.

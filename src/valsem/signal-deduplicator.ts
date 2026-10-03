@@ -82,7 +82,7 @@ export class SignalDeduplicator<K, V> {
    * registers `observe('deactivate')` for automatic eviction.
    */
   getOrCreate(key: K, factory: (key: K) => Signal<V>): Signal<V> {
-    return this.#cache.getOrCreate(key, (k) => {
+    return this.#cache.getOrInsertComputed(key, (k) => {
       const signal = factory(k);
       signal.observe('deactivate', () => this.#remove(k));
       return signal;

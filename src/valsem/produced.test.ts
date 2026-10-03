@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { draft, intern, isCanonical, deepEqual } from 'valsem';
+import { draftOf, intern, isCanonical, deepEqual } from 'valsem';
 import { createSignal, computed } from '../signal.js';
 import { produced } from './produced.js';
 
@@ -21,11 +21,11 @@ describe('produced', () => {
     expect(downstream).toBe(1);
   });
 
-  it('lets the recipe edit an input through draft() without touching the input', () => {
+  it('lets the recipe edit an input through draftOf() without touching the input', () => {
     // Canonical input: untouched material keeps its identity through structural sharing
     const order = createSignal(intern({ lines: [{ price: 2 }, { price: 3 }], total: 0 }));
     const totalled = produced(() => {
-      const d = draft(order());
+      const d = draftOf(order());
       d.total = d.lines.reduce((s, l) => s + l.price, 0);
       return d;
     });

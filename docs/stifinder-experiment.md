@@ -11,7 +11,11 @@ removed, so the "Reproduce" section below describes the tree as it was
 during the experiment; the deviation and edge budgets default to unbounded.
 A later round removed valsem from the core entirely (it is now an optional
 peer of `kilde/valsem`, at 0.0.4), so the valsem statements below are
-historical too.
+historical too. In stifinder 0.2.0 the adapter described below moved into
+stifinder as `decisionModel` (its decision D36), with two of its defects
+fixed: a body that threw before its first decision passed, and a body's
+promise was not awaited. `src/testing/explore.ts` is now a call of
+`check(decisionModel(body))`.
 
 ## Question
 

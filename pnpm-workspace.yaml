@@ -1,4 +1,5 @@
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:
-  - stifinder@0.1.0
+  - stifinder@0.2.0
+  - valsem@0.1.0

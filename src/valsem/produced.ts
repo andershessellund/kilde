@@ -2,7 +2,7 @@
 // produced — a computed whose result is a canonical valsem value
 //
 // The recipe runs inside a valsem `produce()` session with no base. It may
-// read signals (tracked as usual), call `draft(x)` on any value it wants to
+// read signals (tracked as usual), call `draftOf(x)` on any value it wants to
 // edit with mutable syntax, and return a value. valsem finalises the return
 // value: nested drafts resolve, the whole thing is canonicalised, and every
 // draft is revoked. Because the result is canonical, the signal's
@@ -19,7 +19,7 @@ import type { ComputedOptions } from '../signal.js';
 /**
  * A `computed` whose result is a canonical value.
  *
- * Inside `recipe`, read signals as usual and call valsem's `draft(value)`
+ * Inside `recipe`, read signals as usual and call valsem's `draftOf(value)`
  * on anything you want to edit in place; return the result. When the
  * inputs are themselves canonical (the output of another `produced`, or
  * anything passed through `intern`), untouched parts keep their identity
@@ -29,7 +29,7 @@ import type { ComputedOptions } from '../signal.js';
  *
  * Two rules. A draft must not escape the recipe except through the return
  * value; valsem revokes drafts when the recipe ends, so a leaked draft
- * throws on first use. And `draft()` belongs in the `produced` recipe
+ * throws on first use. And `draftOf()` belongs in the `produced` recipe
  * itself, never in a plain `computed` that the recipe reads: such a computed
  * would evaluate inside the recipe's session the first time, succeed, and
  * cache a draft that is revoked the moment the recipe ends.
@@ -41,12 +41,12 @@ import type { ComputedOptions } from '../signal.js';
  *
  * @example
  * ```ts
- * import { draft } from 'valsem';
+ * import { draftOf } from 'valsem';
  *
  * const visible = produced(() => todos().filter((t) => !t.done));
  *
  * const withTotals = produced(() => {
- *   const order = draft(currentOrder());
+ *   const order = draftOf(currentOrder());
  *   order.total = order.lines.reduce((sum, l) => sum + l.price, 0);
  *   return order;
  * });
